@@ -2,11 +2,11 @@
 
 **AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond!. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, neural network design, hyperparameter optimization, and standalone model deployment.
 
-> **🎯 Auto Aim to predictions in minutes, not days.**
+> ** Auto Aim to predictions in minutes, not days.**
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 | Feature | Description |
 |---------|-------------|
@@ -56,7 +56,7 @@ python -m app.main
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Load Your Data
 
@@ -84,7 +84,7 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
 
 ---
 
-## 📸 Screenshots
+## Screenshots
 
 <p align="center">
   <em>Screenshots will be added here upon release</em>
@@ -100,7 +100,7 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
 
 ---
 
-## 📖 Documentation
+## Documentation
 
 - [User Manual](USER_MANUAL.md) - Complete guide to all features
 - [API Documentation](docs/API.md) - For developers extending the software
@@ -108,7 +108,7 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 AutoAIM Studio
@@ -139,13 +139,13 @@ If you use AutoAIM Studio in your research, please cite:
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - This work was supported by [C. G. V. de la G. received support from CONAHCyT under postdoctoral fellowship I1200/311/2023 “Estancias Posdoctorales por Mexico Convocatoria 2023(1) Estancia Posdoctoral Inicial/Academica”. We also acknowledge support from DGAPA-UNAM (PAPIIT IN200125).].
 - Thanks to the open-source community for scikit-learn, PyTorch, Optuna, and SHAP.
