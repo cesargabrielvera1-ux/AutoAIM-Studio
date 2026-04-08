@@ -25,7 +25,7 @@
 
 ### Option A: Use Pre-built Executable (Recommended for Windows)
 
-1. Download the latest release from [Releases]([https://github.com/yourusername/autoaim-studio/releases](https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
+1. Download the latest release from [Releases] (https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
 2. Extract the ZIP file
 3. Run `AutoAIM Studio.exe`
 
@@ -35,7 +35,7 @@ No Python installation required!
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/autoaim-studio.git
+git clone https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git
 cd autoaim-studio
 
 # Create virtual environment (recommended)
