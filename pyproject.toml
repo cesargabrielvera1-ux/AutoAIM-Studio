@@ -1,0 +1,147 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoaim-studio"
+version = "1.0.0"
+description = "AutoAIM Studio (Auto Artificial Intelligence for Materials Studio)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9,<3.13"
+authors = [
+    {name = "Cesar Gabriel Vera de la Garza; Serguei Fomine"}
+]
+keywords = [
+    "machine learning",
+    "materials science",
+    "materials informatics",
+    "automated machine learning",
+    "neural networks",
+    "desktop application",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "PyQt6>=6.4.0,<7.0.0",
+    "Pillow>=9.0.0,<11.0.0",
+    "scikit-learn>=1.2.0,<2.0.0",
+    "xgboost>=1.7.0,<3.0.0",
+    "lightgbm>=4.0.0,<5.0.0",
+    "catboost>=1.2.0,<2.0.0",
+    "torch>=2.0.0,<3.0.0",
+    "optuna>=3.0.0,<4.0.0",
+    "shap>=0.42.0,<1.0.0",
+    "pandas>=1.5.0,<3.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "openpyxl>=3.0.0,<4.0.0",
+    "joblib>=1.2.0,<2.0.0",
+    "scipy>=1.10.0,<2.0.0",
+    "matplotlib>=3.6.0,<4.0.0",
+    "seaborn>=0.12.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0,<8.0.0",
+    "pytest-cov>=4.0.0,<5.0.0",
+    "black>=23.0.0,<24.0.0",
+    "flake8>=6.0.0,<7.0.0",
+    "mypy>=1.0.0,<2.0.0",
+    "sphinx>=6.0.0,<7.0.0",
+    "sphinx-rtd-theme>=1.2.0,<2.0.0",
+]
+build = [
+    "pyinstaller>=5.13.0,<6.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git"
+Documentation = "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git"
+Repository = "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git"
+Changelog = "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git/CHANGELOG.md"
+
+[project.scripts]
+autoaim-studio = "main:main"
+
+[tool.setuptools]
+packages = ["src"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["*.ui", "*.qrc", "*.png", "*.ico", "*.json"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/test_*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
