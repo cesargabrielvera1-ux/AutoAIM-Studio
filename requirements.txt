@@ -1,0 +1,87 @@
+# =============================================================================
+# AutoAIM Studio - Production Requirements
+# =============================================================================
+# Python 3.9+ required
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# =============================================================================
+# Core GUI
+# =============================================================================
+# PyQt6: Modern Qt bindings for Python GUI
+# Version 6.4+ required for proper styling and widget support
+PyQt6>=6.4.0,<7.0.0
+
+# Pillow: Image processing for GUI elements and visualizations
+Pillow>=9.0.0,<11.0.0
+
+# =============================================================================
+# Machine Learning
+# =============================================================================
+# scikit-learn: Core ML algorithms (RF, GB, SVR, preprocessing)
+# Version 1.2+ for consistent API and performance improvements
+scikit-learn>=1.2.0,<2.0.0
+
+# XGBoost: Optimized gradient boosting
+# Version 1.7+ for compatibility with scikit-learn 1.2+
+xgboost>=1.7.0,<3.0.0
+
+# LightGBM: Fast gradient boosting with histogram-based algorithm
+# Version 4.0+ for improved performance and stability
+lightgbm>=4.0.0,<5.0.0
+
+# CatBoost: Gradient boosting with native categorical support
+# Version 1.2+ for consistent API
+catboost>=1.2.0,<2.0.0
+
+# =============================================================================
+# Neural Networks
+# =============================================================================
+# torch: PyTorch for neural network training and TorchScript export
+# Version 2.0+ for TorchScript stability and performance
+torch>=2.0.0,<3.0.0
+
+# =============================================================================
+# Optimization & Explainability
+# =============================================================================
+# optuna: Bayesian hyperparameter optimization
+# Version 3.0+ for improved TPE sampler and pruning support
+optuna>=3.0.0,<4.0.0
+
+# shap: SHAP values for model interpretability
+# Version 0.42+ for improved TreeExplainer and visualization support
+shap>=0.42.0,<1.0.0
+
+# =============================================================================
+# Data Processing
+# =============================================================================
+# pandas: Data manipulation and analysis
+# Version 1.5+ for improved performance and API consistency
+pandas>=1.5.0,<3.0.0
+
+# numpy: Numerical computing
+# Version 1.24+ for compatibility with pandas and scikit-learn
+numpy>=1.24.0,<2.0.0
+
+# openpyxl: Excel file reading/writing
+# Version 3.0+ for modern Excel format support
+openpyxl>=3.0.0,<4.0.0
+
+# joblib: Model serialization
+# Version 1.2+ for efficient parallel processing and caching
+joblib>=1.2.0,<2.0.0
+
+# scipy: Scientific computing (required by scikit-learn)
+# Version 1.10+ for improved sparse matrix support
+scipy>=1.10.0,<2.0.0
+
+# =============================================================================
+# Visualization
+# =============================================================================
+# matplotlib: Static plotting
+# Version 3.6+ for improved styling and performance
+matplotlib>=3.6.0,<4.0.0
+
+# seaborn: Statistical visualization
+# Version 0.12+ for improved API and matplotlib compatibility
+seaborn>=0.12.0,<1.0.0
