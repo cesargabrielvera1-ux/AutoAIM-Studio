@@ -4,7 +4,7 @@ Thank you for your interest in contributing to AutoAIM Studio! This document pro
 
 ---
 
-## 🐛 Reporting Bugs
+## Reporting Bugs
 
 If you find a bug, please create a GitHub Issue with the following information:
 
@@ -22,7 +22,7 @@ Use the bug report template when creating issues.
 
 ---
 
-## 💡 Suggesting Features
+## Suggesting Features
 
 We welcome feature suggestions! To propose a new feature:
 
@@ -33,14 +33,14 @@ We welcome feature suggestions! To propose a new feature:
 
 ---
 
-## 🔧 Contributing Code
+## Contributing Code
 
 ### Setting Up Development Environment
 
 ```bash
 # Fork the repository on GitHub
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/autoaim-studio.git
+git clone https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git
 cd autoaim-studio
 
 # Create a virtual environment
@@ -102,7 +102,7 @@ pytest
 
 ---
 
-## 📝 Code Style Guidelines
+## Code Style Guidelines
 
 ### Python Style
 
@@ -163,7 +163,7 @@ def train_model(
 
 ---
 
-## 🧪 Testing Guidelines
+## Testing Guidelines
 
 ### Test Structure
 
@@ -234,7 +234,7 @@ def sample_dataframe():
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - Update `USER_MANUAL.md` if adding new features
 - Add docstrings to all public functions and classes
@@ -242,7 +242,7 @@ def sample_dataframe():
 
 ---
 
-## 🏷️ Release Process
+## Release Process
 
 1. Update version in `pyproject.toml`
 2. Update `CHANGELOG.md`
@@ -252,7 +252,7 @@ def sample_dataframe():
 
 ---
 
-## 📋 Code of Conduct
+## Code of Conduct
 
 ### Our Standards
 
@@ -270,12 +270,12 @@ def sample_dataframe():
 
 ---
 
-## ❓ Questions?
+## Questions?
 
-- Check existing [GitHub Issues](https://github.com/yourusername/autoaim-studio/issues)
+- Check existing [GitHub Issues](https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git/issues)
 - Create a new issue with the "Question" label
 - Join our discussions (coming soon)
 
 ---
 
-Thank you for contributing to AutoAIM Studio! 🎉
+Thank you for contributing to AutoAIM Studio! 
