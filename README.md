@@ -25,7 +25,7 @@
 
 ### Option A: Use Pre-built Executable (Recommended for Windows)
 
-1. Download the latest release from [Releases](https://github.com/yourusername/autoaim-studio/releases)
+1. Download the latest release from [Releases]([https://github.com/yourusername/autoaim-studio/releases](https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
 2. Extract the ZIP file
 3. Run `AutoAIM Studio.exe`
 
@@ -52,7 +52,7 @@ python -m app.main
 **Requirements:**
 - Python 3.9 or higher
 - 8GB RAM minimum (16GB recommended)
-- CUDA-compatible GPU (optional, for neural network acceleration)
+- CUDA-compatible GPU support in progress. optional, for neural network acceleration)
 
 ---
 
@@ -132,7 +132,7 @@ If you use AutoAIM Studio in your research, please cite:
   authors = {Cesar Gabriel Vera de la Garza; Serguei Fomine},
   title = {AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio},
   year = {2026},
-  url = {https://github.com/yourusername/autoaim-studio},
+  url = {https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git},
   doi = {10.5281/zenodo.XXXXXXX}  % Coming soon
 }
 ```
