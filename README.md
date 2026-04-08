@@ -21,11 +21,11 @@
 
 ---
 
-## Installation
+## Installation (Right now AutoAIM is only available for Windows)
 
-### Option A: Use Pre-built Executable (Recommended for Windows)
+### Option A: Use Pre-built Executable (Recommended)
 
-1. Download the latest release from [Releases] (https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
+1. Download the latest release from (https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
 2. Extract the ZIP file
 3. Run `AutoAIM Studio.exe`
 
@@ -52,7 +52,7 @@ python -m app.main
 **Requirements:**
 - Python 3.9 or higher
 - 8GB RAM minimum (16GB recommended)
-- CUDA-compatible GPU support in progress. optional, for neural network acceleration)
+- CUDA-compatible GPU support in progress.
 
 ---
 
