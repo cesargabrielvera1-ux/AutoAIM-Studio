@@ -28,8 +28,8 @@ preferred-citation:
   authors:
     - names: "Cesar Gabriel Vera de la Garza; Serguei Fomine"
   year: 2026
-  journal: "Journal of Open Source Software"
+  publisher: Zenodo
   volume: 0
   issue: 0
   pages: 0
-  doi: "10.21105/joss.00000 (TBA)"
+  doi: 10.5281/zenodo.19478357
