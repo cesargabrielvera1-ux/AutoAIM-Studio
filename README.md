@@ -102,7 +102,7 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
 
 ## Documentation
 
-- [User Manual](USER_MANUAL.md) - Complete guide to all features
+- [User Manual](USER_MANUAL_EN.pdf) - Complete guide to all features also available in spanish
 - [API Documentation](docs/API.md) - For developers extending the software
 - [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project
 
