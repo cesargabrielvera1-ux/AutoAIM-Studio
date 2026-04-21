@@ -87,16 +87,17 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
 ## Screenshots
 
 <p align="center">
-  <em>Screenshots will be added here upon release</em>
+ 
 </p>
 
-| Data Loading | Model Training | Neural Network Design |
-|:------------:|:--------------:|:---------------------:|
-| *Placeholder: CSV import with automatic column detection* | *Placeholder: Multiple models training simultaneously* | *Placeholder: Visual layer configuration* |
 
-| Hyperparameter Optimization | Model Explainability | Standalone Prediction |
-|:---------------------------:|:--------------------:|:---------------------:|
-| *Placeholder: Bayesian optimization progress* | *Placeholder: SHAP value visualization* | *Placeholder: Inference on new data* |
+## Model Training 
+<img width="2559" height="1529" alt="Figure-1" src="https://github.com/user-attachments/assets/5ba246af-7c5f-4461-91cd-99902c748fd1" />
+Multiple models training simultaneously
+
+## Results Tab
+<img width="2559" height="1526" alt="Figure-2" src="https://github.com/user-attachments/assets/d478eefb-3d7e-4597-989f-3abe60b0ff06" />
+Mutiple results showing in real time
 
 ---
 
