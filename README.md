@@ -21,31 +21,32 @@
 
 ---
 
-## Installation (Right now AutoAIM is only available for Windows)
+## Installation
 
-### Option A: Use Pre-built Executable (Recommended)
+### Windows (Standalone Executable — Recommended)
 
-1. Download the latest release from (https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git))
+Requires: Windows 10 / 11 (Recommended)
+
+1. Download the latest release from [GitHub Releases](https://github.com/cesargabrielvera1-ux/AutoAIM-Studio/releases)
 2. Extract the ZIP file
 3. Run `AutoAIM Studio.exe`
 
 No Python installation required!
 
-### Option B: Install from Source
+### Linux (Install from Source)
+
+Requires: Ubuntu 20.04/22.04 (or compatible), Python 3.9+, 8 GB RAM minimum
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git
-cd autoaim-studio
+cd AutoAIM-Studio
 
-# Create virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# 2. Run the automated installer
+chmod +x scripts/install_linux.sh
+./scripts/install_linux.sh
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Launch the application
+# 3. Launch the application
 python -m app.main
 ```
 
