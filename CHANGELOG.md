@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dedicated Ensemble Results tab displaying CV scores, member weights, and per-member contributions
 - Dedicated Neural Network Results tab showing NN-specific metrics, training epochs, loss history, and cross-validation results
 - CV Score display for all model types in the redesigned Results tab (Training, Optimization, Neural Network, and Ensemble views)
-- NNParameterRangeDialog for interactive editing of neural network optimization search ranges
+- NNParameterRangeDialog for interactive editing of neural network optimization search ranges.
 
 ### Changed
 - Neural network training now performs full K-fold cross-validation when CV folds > 1, with fresh model instances per fold and early stopping on each fold
