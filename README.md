@@ -138,8 +138,8 @@ Mutiple results showing in real time
 
 ## Documentation
 
-- [User Manual](USER_MANUAL_EN.pdf) - Complete guide to all features also available in spanish
-- [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project
+- [User Manual](USER_MANUAL_EN.pdf) - Complete guide to all features also available in spanish.
+- [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project.
 
 ---
 
