@@ -170,7 +170,7 @@ If you use AutoAIM Studio in your research, please cite:
   title = {AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio},
   year = {2026},
   url = {https://github.com/cesargabrielvera1-ux/AutoAIM-Studio},
-  doi = {10.5281/zenodo.19478357}
+  doi = {10.5281/zenodo.19478356}
 }
 ```
 
