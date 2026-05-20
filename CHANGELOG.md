@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-05-18
+
+### Added
+- Neural Network hyperparameter optimization with custom range editing for layers, units, dropout, activation, learning rate, batch size, and optimizer selection
+- "Apply Best Parameters to Architecture" button for neural networks — one-click rebuild of the network with optimized hyperparameters
+- "Train with Best Parameters" button for regressors — one-click training using the best model found during optimization
+- Configurable K-fold cross-validation (1–10 folds) for neural network training and optimization
+- Configurable K-fold cross-validation (1–10 folds) for regressor optimization
+- Configurable K-fold cross-validation (1–10 folds) for ensemble training and weight optimization
+- Ensemble weight optimization using Bayesian optimization (Optuna) to find optimal member contributions
+- New ensemble training engine (`core/ensemble_trainer.py`) supporting weighted average and stacking strategies
+- Dedicated Ensemble Results tab displaying CV scores, member weights, and per-member contributions
+- Dedicated Neural Network Results tab showing NN-specific metrics, training epochs, loss history, and cross-validation results
+- CV Score display for all model types in the redesigned Results tab (Training, Optimization, Neural Network, and Ensemble views)
+- NNParameterRangeDialog for interactive editing of neural network optimization search ranges
+
+### Changed
+- Neural network training now performs full K-fold cross-validation when CV folds > 1, with fresh model instances per fold and early stopping on each fold
+- Regressor optimization passes user-configured CV folds to all Optuna trials; per-trial CV scores are tracked and stored
+- Ensemble training respects user-selected model subsets and skips nested ensemble models to prevent prediction errors
+- Data manager now trusts pandas dtype detection for numeric columns; binary 0/1 columns are preserved as numeric
+- XGBoost `tree_method` changed to `'auto'` for compatibility with both CPU-only and GPU-enabled installations
+- All training and optimization tabs now properly use external validation data when loaded
+- SVM and KNeighbors optimization no longer passes `random_state`, preventing crashes with unsupported estimators
+- `batch_size` sampled as categorical during NN optimization is now cast to `int` before use
+- Inference engine sanitizes "Unnamed" artifact columns from manifest feature names and prediction input DataFrames
+- `index_col=False` used on all CSV loads to prevent trailing-comma artifacts
+
+### Fixed
+- CV Score not appearing for Neural Networks in the Results tab
+- CV Score not appearing for Optimized Models in the Results tab
+- CV Score not appearing for Ensemble models in the Results tab
+- Escaped `\n` characters appearing literally in console output
+- `AttributeError: 'DataManager' object has no attribute '_problem_type'`
+- `AttributeError: 'EnsembleTab' object has no attribute '_on_training_error'`
+- `AttributeError: 'NNBuilderTab' object has no attribute 'nn_optimizer_results'`
+- `AttributeError: 'dict' object has no attribute 'model_names'` (ensemble `optimize_weights` return type)
+- Ensemble using all models instead of the user-selected subset
+- Ensemble attempting to use other ensembles as base models
+- Incorrect CV score calculation during optimization (was averaging across all trials; now stores best-trial fold scores)
+- `name 'X_test' is not defined` error during neural network optimization
+- NN Optimized model not found for learning curves and model export
+- NN Optimized model not appearing in the Explainability tab
+- Ensemble Explainability crash due to missing predict method on ensemble models
+- Binary 0/1 columns incorrectly classified as categorical
+- Numeric columns with repeated values incorrectly classified as categorical
+- External validation data being ignored by training and optimization tabs
+- SVM optimization crash caused by passing `random_state` to SVR/SVC
+- Neural network optimization crash caused by `batch_size` categorical comparison between `int` and `str`
+- XGBoost GPU incompatibility with CPU-only installations
+- Prediction failure due to "Unnamed: xxx" CSV artifact columns
+
+---
+
 ## [1.0.0] - 2026-04-08
 
 ### Added
@@ -74,41 +128,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned for Future Releases
 
-#### [1.1.0] - Target: Q3 2026
+#### [1.2.0] — Target: Q3 2026
 - **New Features**
   - Crystal structure featurization (CIF file support)
   - Additional elemental properties database
   - Custom descriptor builder
   - Batch prediction interface
   - Model versioning and management
-  
+
 - **Improvements**
   - Enhanced neural network architectures (CNN, Transformer)
   - Faster featurization with caching
   - Improved GUI responsiveness
   - Better error messages and validation
 
-#### [1.2.0] - Target: Q4 2026
+#### [1.3.0] — Target: Q4 2026
 - **New Features**
   - Multi-target prediction support
   - Classification mode for categorical properties
   - Time-series analysis for degradation modeling
   - Integration with materials databases (Materials Project, AFLOW)
-  
+
 - **Improvements**
   - Distributed training support
   - GPU acceleration for neural networks
   - Advanced visualization options
   - Plugin system for custom algorithms
 
-#### [2.0.0] - Target: 2027
+#### [2.0.0] — Target: 2027
 - **New Features**
   - Web-based interface option
   - REST API for integration
   - Collaborative features
   - Advanced uncertainty quantification
   - Active learning support
-  
+
 - **Breaking Changes**
   - Potential API changes for model bundles
   - Updated minimum Python version
@@ -130,9 +184,10 @@ Each release section includes:
 
 ## Version History
 
-| Version | Date | Description |
-|---------|------|-------------|
-| 1.0.0 | 2026-04-08 | Initial stable release |
+| Version | Date       | Description                                                         |
+|---------|------------|---------------------------------------------------------------------|
+| 1.1.0   | 2026-05-18 | Neural network optimization, CV folds, ensemble weight optimization |
+| 1.0.0   | 2026-04-08 | Initial stable release                                              |
 
 ---
 
@@ -156,7 +211,7 @@ pytest tests/
 
 ### Pre-built Executable
 
-Download the latest release from the [Releases](https://github.com/yourusername/autoaim-studio/releases) page and replace the existing executable.
+Download the latest release from the [Releases](https://github.com/cesargabrielvera1-ux/AutoAIM-Studio/releases) page and replace the existing executable.
 
 ---
 
@@ -169,5 +224,8 @@ When submitting pull requests, please:
 4. Keep entries concise but descriptive
 
 ---
+
+For detailed migration guides between versions, see the [Migration Guide](docs/MIGRATION.md).
+
 
 For detailed migration guides between versions, see the [Migration Guide](docs/MIGRATION.md).
