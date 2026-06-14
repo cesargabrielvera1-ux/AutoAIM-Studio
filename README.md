@@ -1,4 +1,4 @@
-# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio V 1.1.0.
+# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio V 1.2.0.
 
 **AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond!. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, neural network design, hyperparameter optimization, and standalone model deployment.
 
@@ -6,31 +6,72 @@
 
 ---
 
-## What's New in v1.1.0
+## What's New in v1.2.0
 
-- **Neural Network Hyperparameter Optimization** — Custom search ranges for layers, units, dropout, activation, learning rate, and batch size, with one-click apply to architecture
-- **Cross-Validation for All Models** — Configurable K-fold CV (1–10 folds) for neural networks, regressors, and ensemble models
-- **Ensemble Weight Optimization** — Bayesian optimization of ensemble member weights via Optuna for improved predictive performance
-- **One-Click "Train with Best Parameters"** — Train optimized regressors instantly after hyperparameter tuning completes
-- **Full Backward Compatibility** — All v1.0.0 model bundles work without modification; no migration needed
+* **Crystal Structure Support** — Load and featurize CIF, POSCAR, and XYZ files with \~154 automatically-extracted crystallographic descriptors (lattice, composition, Magpie, and advanced structural features)
+* **SVR \& KNN Optimization Fix** — Support Vector Machine and k-Nearest Neighbors no longer crash during hyperparameter optimization
+* **PyInstaller Packaging Fix** — Reliable bundling of pymatgen data files for standalone Windows executables
+* **Improved Featurizer UX** — Context-aware messaging distinguishes crystal-structure datasets from CSV formula datasets
+* **Full Backward Compatibility** — All v1.0.0 and v1.1.0 model bundles work without modification
 
 ---
 
 ## Key Features
 
-| Feature | Description |
-|---------|-------------|
-| **Compositional Featurization** | Custom 106-descriptor generator from chemical formulas (no MatMiner dependency) |
-| **AutoML Training** | Train multiple algorithms simultaneously with cross-validation |
-| **Visual Neural Networks** | Design and train custom PyTorch architectures with a visual interface |
-| **Bayesian Optimization** | Hyperparameter tuning with Optuna for best model performance |
-| **Model Bundles** | Self-contained model packages with manifest.json for reproducibility |
-| **Standalone Prediction** | Deploy trained models for inference without the full application |
-| **Explainability** | SHAP values, permutation importance, and partial dependence plots |
-| **Ensemble Models** | Combine multiple models for improved predictions |
-| **Neural Network Optimization** | Hyperparameter tuning with custom ranges and one-click architecture rebuild |
-| **Ensemble Weight Optimization** | Bayesian optimization of ensemble member weights via Optuna |
-| **Cross-Validation for All Models** | Configurable K-fold CV for regressors, neural networks, and ensembles |
+|Feature|Description|
+|-|-|
+|**Crystal Structure Loading**|Import CIF, POSCAR, CONTCAR, XYZ, and VASP files for automatic featurization|
+|**Crystallographic Featurization**|\~154 descriptors per structure: lattice, composition, Magpie (106), bond analysis, RDF|
+|**Compositional Featurization**|Custom 106-descriptor Magpie generator from chemical formulas (no MatMiner dependency)|
+|**AutoML Training**|Train multiple algorithms simultaneously with cross-validation|
+|**Visual Neural Networks**|Design and train custom PyTorch architectures with a visual interface|
+|**Bayesian Optimization**|Hyperparameter tuning with Optuna for best model performance|
+|**Model Bundles**|Self-contained model packages with manifest.json for reproducibility|
+|**Standalone Prediction**|Deploy trained models for inference without the full application|
+|**Explainability**|SHAP values, permutation importance, and partial dependence plots|
+|**Ensemble Models**|Combine multiple models for improved predictions|
+|**Neural Network Optimization**|Hyperparameter tuning with custom ranges and one-click architecture rebuild|
+|**Ensemble Weight Optimization**|Bayesian optimization of ensemble member weights via Optuna|
+|**Cross-Validation for All Models**|Configurable K-fold CV for regressors, neural networks, and ensembles|
+
+---
+
+## Crystal Structure Support (New in v1.2.0)
+
+AutoAIM Studio now supports direct loading of crystallographic files:
+
+### Supported Formats
+
+|Format|Extension|Description|
+|-|-|-|
+|CIF|`.cif`|Crystallographic Information File|
+|POSCAR|`.poscar`|VASP position file|
+|CONTCAR|`.contcar`|VASP continuation file|
+|XYZ|`.xyz`|Cartesian coordinates|
+|VASP|`.vasp`|Generic VASP format|
+
+### Automatic Feature Extraction
+
+When you load structure files, the application automatically extracts **\~154 numeric features** per structure:
+
+|Category|Count|Examples|
+|-|-|-|
+|**Lattice**|\~10|a, b, c, alpha, beta, gamma, volume, abc\_ratio, symmetry flags|
+|**Composition**|\~13|avg\_atomic\_number, avg\_electronegativity, avg\_ionization\_energy, radii, variance|
+|**Structural**|\~3|volume\_per\_atom, packing\_fraction, spacegroup\_number|
+|**Magpie**|**106**|Weighted mean, std, min, max, median, p25, p75 for 13 elemental properties|
+|**Advanced**|\~15|Bond lengths, coordination numbers, RDF peaks, lattice anisotropy, complexity|
+|**Derived**|\~2|Density, total\_electrons|
+
+These features are pure numeric vectors that feed directly into the AutoAIM training pipeline — no additional preprocessing required.
+
+### How to Use
+
+1. **Load Structures:** Click "Load Directory" to import all structure files from a folder, or "Load Files" for individual files
+2. **Attach Targets:** Provide target values (e.g., band gap, formation energy) via CSV or manual entry
+3. **Train:** The featurized dataset feeds directly into any AutoAIM model (Random Forest, XGBoost, Neural Networks, etc.)
+
+> \*\*Note:\*\* The manual featurizer ("Apply Featurizer" button) is designed for CSV files with a `formula` or `composition` column. Crystal structure datasets are already fully featurized upon loading.
 
 ---
 
@@ -52,7 +93,7 @@ Requires: Ubuntu 20.04/22.04 (or compatible), Python 3.9+, 8 GB RAM minimum
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/cesargabrielvera1-ux/AutoAIM-Studio.git
+git clone https://github.com/cesargabrielvera1-ux/AutoAIM-Studio
 cd AutoAIM-Studio
 
 # 2. Run the automated installer
@@ -113,6 +154,14 @@ Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
  
 </p>
 
+## Loading Crystal Structures from Data Tab
+<img width="1279" height="746" alt="Captura de pantalla 2026-06-14 090919" src="https://github.com/user-attachments/assets/b5f574df-4d9c-4278-8721-84f488690087" />
+Load crystal structure supported formats by individually selecting them or loading the entire directory. Once the structures are Loaded the program will show a messasge requesting the user to choose the .csv with target and a column named 'structure_name' matching the structure files. If different than 'structure_name' column is available in the .csv the program will show an error. Rename the column as requested and try again. Structure names in the .csv MUST match the provided structures names.
+
+## Data Tab Showing Crystal Structure Data After Successfull Data Load
+<img width="1279" height="748" alt="Captura de pantalla 2026-06-14 091005" src="https://github.com/user-attachments/assets/3376b5ae-923f-472e-94e7-3896accbab94" />
+The same interface you love remains untouched with same funcionality.
+
 ## Neural Network Training and Optimization Tab
 <img width="2559" height="1496" alt="Captura de pantalla 2026-05-20 113623" src="https://github.com/user-attachments/assets/ebbbfe77-7334-4ffc-ac60-3d91838ad91b" />
 Build a custom Neural Network and train it, or select optimization ranges and optimize! Apply best hyperparameters and retrain.
@@ -124,7 +173,6 @@ Select optimization ranges for each regressor and optimize. Apply best hyperpara
 ## Ensemble Models Optimization Tab
 <img width="2559" height="1492" alt="Captura de pantalla 2026-05-20 113741" src="https://github.com/user-attachments/assets/bb6c0ec1-9c9f-4f37-8837-aaaeed9147b3" />
 Optimize weights of custom ensemble models.
-
 
 ## Model Training 
 <img width="2559" height="1529" alt="Figure-1" src="https://github.com/user-attachments/assets/5ba246af-7c5f-4461-91cd-99902c748fd1" />
@@ -138,8 +186,24 @@ Mutiple results showing in real time
 
 ## Documentation
 
-- [User Manual](USER_MANUAL_EN.pdf) - Complete guide to all features also available in spanish.
-- [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project.
+|Document|Description|
+|-|-|
+|[README.md](README.md)|This file — overview and quick start|
+|[RELEASE\_NOTES\_v1.2.0.md](RELEASE_NOTES.md)|Detailed changelog for v1.2.0|
+|[USAGE.md](USAGE.md)|Detailed user guide|
+|[USER\_MANUAL.md](USER_MANUAL.md)|Complete manual|
+
+---
+
+## Version History
+
+|Version|Date|Highlights|
+|-|-|-|
+|**v1.2.0**|**Jun 2026**|**Crystal Structure Support, SVR/KNN fix, PyInstaller fix**|
+|v1.1.0|May 2026|Neural Network Optimization, CV for all models, Ensemble Weight Optimization|
+|v1.0.0|Mar 2026|Initial release — AutoML pipeline, NN builder, ensembles, deployment|
+
+See [RELEASE\_NOTES\_v1.2.0.md](RELEASE_NOTES.md) for detailed changelog.
 
 ---
 
@@ -185,8 +249,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - This work was supported by [C. G. V. de la G. received support from CONAHCyT under postdoctoral fellowship I1200/311/2023 “Estancias Posdoctorales por Mexico Convocatoria 2023(1) Estancia Posdoctoral Inicial/Academica”. We also acknowledge support from DGAPA-UNAM (PAPIIT IN200125).].
-- Thanks to the open-source community for scikit-learn, PyTorch, Optuna, and SHAP.
 - Special thanks to beta testers and early adopters.
+* **pymatgen** — Crystal structure parsing and analysis ([pymatgen.org](https://pymatgen.org))
+* **PyTorch** — Neural network backend ([pytorch.org](https://pytorch.org))
+* **Optuna** — Bayesian hyperparameter optimization ([optuna.org](https://optuna.org))
+* **scikit-learn** — Classical machine learning algorithms ([scikit-learn.org](https://scikit-learn.org))
+* **SHAP** — Model explainability ([shap.readthedocs.io](https://shap.readthedocs.io))
+
 
 ---
 
