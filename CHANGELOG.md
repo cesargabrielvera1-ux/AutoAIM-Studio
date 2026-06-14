@@ -5,6 +5,47 @@ All notable changes to AutoAIM Studio will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+--
+
+## [1.2.0] - 2026-06-14
+
+### Added
+- **Crystal Structure Support** -- load and featurize CIF, POSCAR, CONTCAR, VASP, and XYZ files
+  - `CrystalStructureLoader` -- parses structure files via pymatgen (no MatMiner dependency)
+  - `CrystalStructureFeaturizer` -- extracts ~154 numeric descriptors per structure:
+    - Lattice features (10): a, b, c, angles, volume, symmetry flags
+    - Composition features (13): avg atomic number, electronegativity, radii, ionization energy
+    - Structural features (3): volume per atom, packing fraction, space group number
+    - Magpie descriptors (104): mean/std/min/max/median/p25/p75/range for 13 elemental properties
+    - Advanced structural (15): bond lengths, coordination numbers, RDF peaks, lattice anisotropy
+    - Derived features (2): density, total electrons
+  - `CrystalStructureDatasetBuilder` -- builds complete ML-ready datasets from directories or file lists
+  - Target CSV merge with `structure_name` as join key
+- **Crystal Structure Prediction** in Inference tab -- load CIF/POSCAR/XYZ files and predict without external CSV metadata; structures are automatically featurized using the same pipeline as training
+- **Target CSV Column Selection** dialog -- when loading a target CSV, the user selects which numeric column is the property to predict; all other columns (composition, file paths, etc.) are automatically discarded
+- **Smart Featurizer Messages** -- clicking "Apply Featurizer" on a crystal-structure dataset now shows an informative dialog explaining that ~154 features are already present, instead of the confusing "No composition columns detected"
+- **ID-Bug Detection** -- Inference tab detects models trained with the old one-hot encoding bug (400+ features including `structure_name_*` columns) and warns the user to retrain
+- **Export with Structure Names** -- prediction exports preserve `structure_name` as the first column for crystal-structure datasets
+- **PyInstaller Build Fix** -- reliable bundling of pymatgen data files via `--hidden-import pymatgen` + post-build `xcopy` + `setup_pymatgen()` runtime hook that auto-configures `PMG_HOME`
+- **Documentation** -- `BUILD_v1.2.0_FIXES.md`, `RELEASE_NOTES_v1.2.0.md`, `RELEASE_CHECKLIST_v1.2.0.md`, `.zenodo.json`
+
+### Changed
+- `DataManager.set_target_column()` now selects **only numeric columns** as features; string columns (`structure_name`, composition strings, file paths) are automatically excluded and logged
+- `build_windows_onedir.bat` uses `--hidden-import pymatgen` + post-build `xcopy` instead of `--collect-all pymatgen` (avoids namespace-package crash)
+- `crystal_structure.py._build_dataset()` keeps `structure_name` as a regular column (not index) to enable CSV merge; caller is responsible for index management
+- Results tab `refresh()` no longer displays intermediate `OptimizationResult` or `nn_optimizer_results` entries; only final `TrainingResult` entries are shown (avoids duplicate rows after "Train with Best Parameters")
+- `inference_tab.py._update_data_preview()` and `explainability_tab.py._update_importance_table()` use `enumerate()` for row indexing instead of the DataFrame index (fixes `setItem` crash when index contains strings)
+- `optimizer.py` conditionally applies `random_state` based on algorithm type (excluded for SVR/SVC and KNeighbors)
+
+### Fixed
+- **SVR & KNN Optimization Crash** -- `TypeError: unexpected keyword argument 'random_state'` during hyperparameter optimization
+- **pymatgen Data Missing in PyInstaller** -- `FileNotFoundError: periodic_table.json.gz` when loading crystal structures in the standalone executable
+- **PyInstaller Build Crash** -- `TypeError: expected str, bytes or os.PathLike object, not NoneType` caused by `--collect-all pymatgen` on namespace package (`__file__` = `None`)
+- **Feature Explosion (771+ features)** -- string columns from metadata CSV (composition, file paths) were included as features and one-hot encoded, exploding feature count from ~154 to 600+; now only numeric columns are used as features
+- **Missing Features on Prediction** -- `formation_energy_per_atom` and `num_sites` from metadata CSV leaked into training features but were unavailable during prediction; target CSV dialog now isolates only the target column
+- **String Index Crash** -- `setItem(self, row: int, ...): argument 1 has unexpected type 'str'` when displaying crystal structure data with `structure_name` as DataFrame index
+- **Duplicate Results** -- "xgboost (Optimized)" and "xgboost_Optimized" both appeared in Results tab after optimize + train; intermediate optimization results are now hidden from Results tab
+
 ---
 
 ## [1.1.0] - 2026-05-18
