@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QFrame, QApplication
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
-from PyQt6.QtGui import QAction, QIcon, QFont, QPalette, QColor
+from PyQt6.QtGui import QAction, QIcon, QFont, QPalette, QColor, QPixmap
 
 from ..utils.config import get_config
 from ..utils.logger import setup_logger
@@ -46,9 +46,13 @@ class MainWindow(QMainWindow):
         self.logger.info(self.hardware.format_info())
         
         # Initialize UI
-        window_title = f"AutoAIM Studio: Auto Artificial Intelligence for Materials Studio v{self.config.current.version}"
+        version = "1.2.0"
+        window_title = f"AutoAIM Studio: Auto Artificial Intelligence for Materials Studio v{version}"
         self.setWindowTitle(window_title)
         self.setMinimumSize(1400, 900)
+        
+        # Set application icon (logo with fallback)
+        self._set_application_icon()
         
         # Apply theme
         self._apply_theme()
@@ -338,6 +342,38 @@ class MainWindow(QMainWindow):
             }
         """)
     
+    def _set_application_icon(self):
+        """Set application icon from logo.png with fallback to generic icon.
+        
+        Tries to load logo.png from the project root directory.
+        If that fails, tries common locations. Falls back silently to
+        the system default icon if no logo is found.
+        """
+        logo_paths = [
+            Path(__file__).parent.parent.parent / "logo.png",
+            Path(__file__).parent.parent.parent / "assets" / "logo.png",
+            Path(__file__).parent.parent.parent / "images" / "logo.png",
+            Path.cwd() / "logo.png",
+        ]
+        
+        for logo_path in logo_paths:
+            if logo_path.exists():
+                try:
+                    icon = QIcon(str(logo_path))
+                    self.setWindowIcon(icon)
+                    # Also set for QApplication if available
+                    app = QApplication.instance()
+                    if app:
+                        app.setWindowIcon(icon)
+                    self.logger.info(f"Loaded logo from {logo_path}")
+                    return
+                except Exception as e:
+                    self.logger.warning(f"Failed to load logo from {logo_path}: {e}")
+                    continue
+        
+        # Fallback: use generic system icon (silent, no error)
+        self.logger.info("No logo.png found, using default system icon")
+    
     def _create_menu_bar(self):
         """Create menu bar."""
         menubar = self.menuBar()
@@ -514,22 +550,27 @@ class MainWindow(QMainWindow):
     
     def _show_about(self):
         """Show about dialog."""
+        version = "1.2.0"
         about_text = f"""
-        <h2>{self.config.current.app_name}</h2>
-        <p>Version: {self.config.current.version}</p>
+        <h2>AutoAIM Studio</h2>
+        <p><b>Version:</b> {version}</p>
+        <p><b>Codename:</b> Crystal</p>
         <p>An AutoML platform for materials science.</p>
-        <p>Features:</p>
+        <p><b>v1.2.0 Features:</b></p>
         <ul>
-            <li>Automated machine learning for materials data</li>
+            <li>Automated machine learning for tabular materials data</li>
+            <li>Crystal structure support (CIF, POSCAR, XYZ) with pymatgen featurization</li>
             <li>Neural network builder with PyTorch</li>
             <li>Bayesian hyperparameter optimization</li>
             <li>Model explainability with SHAP</li>
             <li>Domain applicability analysis</li>
+            <li>Ensemble modeling with weight optimization</li>
         </ul>
-        <p>Built with PyQt6, scikit-learn, PyTorch, and Optuna.</p>
+        <p><b>Built with:</b> PyQt6, scikit-learn, PyTorch, Optuna, pymatgen</p>
+        <p><b>Note:</b> Crystal structure features use only pymatgen (no matminer).</p>
         """
         
-        QMessageBox.about(self, "About", about_text)
+        QMessageBox.about(self, "About AutoAIM Studio", about_text)
     
     def closeEvent(self, event):
         """Handle window close event."""
@@ -553,8 +594,8 @@ def run_application():
     app = QApplication(sys.argv)
     
     # Set application info
-    app.setApplicationName("Materials AutoML Studio")
-    app.setApplicationVersion("1.1.0")
+    app.setApplicationName("AutoAIM Studio")
+    app.setApplicationVersion("1.2.0")
     
     # Create and show main window
     window = MainWindow()

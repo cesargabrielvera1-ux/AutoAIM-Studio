@@ -514,6 +514,74 @@ class InferenceEngine(LoggerMixin):
         
         return result
     
+    def predict_from_structures(
+        self,
+        structure_dir: Optional[str] = None,
+        structure_files: Optional[List[str]] = None
+    ) -> pd.DataFrame:
+        """Make predictions from crystal structure files.
+        
+        Loads structure files (CIF, POSCAR, XYZ), featurizes them with the
+        CrystalStructureFeaturizer, and runs prediction using the trained model.
+        
+        This is the PREDICTION counterpart to training on crystal structures.
+        It extracts the same ~154 numeric features that were used during training,
+        then calls predict() with only those numeric features.
+        
+        Args:
+            structure_dir: Directory containing structure files
+            structure_files: List of individual structure file paths
+            
+        Returns:
+            DataFrame with columns [structure_name, prediction] plus any
+            structure metadata
+        """
+        # Lazy import crystal structure module
+        try:
+            from .crystal_structure import CrystalStructureLoader, CrystalStructureFeaturizer
+        except ImportError as e:
+            raise RuntimeError(
+                "Crystal structure support not available. "
+                "Install pymatgen: pip install pymatgen-core"
+            ) from e
+        
+        # Load structures
+        loader = CrystalStructureLoader()
+        if structure_dir:
+            n = loader.load_directory(structure_dir)
+        elif structure_files:
+            n = loader.load_files(structure_files)
+        else:
+            raise ValueError("Must provide structure_dir or structure_files")
+        
+        if n == 0:
+            raise ValueError("No crystal structures loaded")
+        
+        self.logger.info(f"Loaded {n} structures for prediction")
+        
+        # Featurize
+        featurizer = CrystalStructureFeaturizer()
+        features_df = featurizer.featurize_structures(loader.structures)
+        
+        # Set structure_name as index (matching training behavior)
+        if 'structure_name' in features_df.columns:
+            features_df = features_df.set_index('structure_name')
+        
+        # Keep ONLY numeric columns (matching training behavior)
+        numeric_cols = features_df.select_dtypes(include=[np.number]).columns
+        features_df = features_df[numeric_cols].astype(float)
+        
+        self.logger.info(
+            f"Featurized: {len(features_df)} structures, "
+            f"{len(features_df.columns)} numeric features"
+        )
+        
+        # Run prediction using numeric features only
+        result = self.predict(features_df)
+        
+        # structure_name is preserved as the index
+        return result
+    
     @property
     def is_loaded(self) -> bool:
         """Check if model is loaded."""

@@ -73,7 +73,7 @@ def print_banner():
     banner = """
     ╔═══════════════════════════════════════════════════════════════╗
     ║                                                               ║
-    ║           Materials AutoML Studio v1.1.0                      ║
+    ║           Materials AutoML Studio v1.0.0                      ║
     ║                                                               ║
     ║   Automated Machine Learning for Materials Science           ║
     ║                                                               ║
@@ -103,7 +103,7 @@ def main():
     # Create application
     app = QApplication(sys.argv)
     app.setApplicationName("Materials AutoML Studio")
-    app.setApplicationVersion("1.1.0")
+    app.setApplicationVersion("1.0.0")
     app.setOrganizationName("MaterialsAutoML")
     
     # Create and show main window

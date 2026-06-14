@@ -45,7 +45,7 @@ class AppConfig:
     """Main application configuration."""
     app_name: str = "AutoAIM Studio"
     full_name: str = "Auto Artificial Intelligence for Materials Studio"
-    version: str = "1.1.0"
+    version: str = "1.0.0"
     theme: str = "dark"
     auto_save: bool = True
     auto_save_interval: int = 300
@@ -147,7 +147,7 @@ class Config:
             
             return AppConfig(
                 app_name=data.get('app_name', 'Materials AutoML Studio'),
-                version=data.get('version', '1.1.0'),
+                version=data.get('version', '1.0.0'),
                 theme=data.get('theme', 'dark'),
                 auto_save=data.get('auto_save', True),
                 auto_save_interval=data.get('auto_save_interval', 300),

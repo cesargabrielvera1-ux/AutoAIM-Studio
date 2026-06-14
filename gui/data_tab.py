@@ -1,5 +1,6 @@
 """Data loading and preprocessing tab."""
 
+from typing import Optional
 import numpy as np
 import pandas as pd
 from PyQt6.QtWidgets import (
@@ -12,6 +13,10 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from ..core.data_manager import DataManager
 from ..core.feature_engineering import FeatureEngineer
+from ..core.crystal_structure import (
+    CrystalStructureLoader, CrystalStructureFeaturizer,
+    CrystalStructureDatasetBuilder
+)
 
 
 class DataLoadingThread(QThread):
@@ -41,7 +46,16 @@ class DataTab(QWidget):
         self.data_manager: DataManager = None
         self.feature_engineer = FeatureEngineer()
         
+        # Simple logger using print (no LoggerMixin dependency)
+        self.logger = self._SimpleLogger()
+        
         self._init_ui()
+    
+    class _SimpleLogger:
+        """Simple logger that prints to console. No external dependencies."""
+        def info(self, msg): print(f"[INFO] DataTab: {msg}")
+        def warning(self, msg): print(f"[WARNING] DataTab: {msg}")
+        def error(self, msg): print(f"[ERROR] DataTab: {msg}")
     
     def _init_ui(self):
         """Initialize UI."""
@@ -61,6 +75,21 @@ class DataTab(QWidget):
         self.load_val_btn.clicked.connect(self.load_validation_dialog)
         self.load_val_btn.setEnabled(False)
         controls_layout.addWidget(self.load_val_btn)
+        
+        controls_layout.addSpacing(20)
+        
+        # Crystal structure loading (v1.2.0)
+        self.load_xtal_btn = QPushButton("Load Crystal Structures")
+        self.load_xtal_btn.setToolTip("Load CIF, POSCAR, or XYZ files")
+        self.load_xtal_btn.setStyleSheet("background-color: #6A1B9A; color: white;")
+        self.load_xtal_btn.clicked.connect(self.load_crystal_dialog)
+        controls_layout.addWidget(self.load_xtal_btn)
+        
+        self.load_xtal_dir_btn = QPushButton("Load Crystal Directory")
+        self.load_xtal_dir_btn.setToolTip("Load all structures from a directory")
+        self.load_xtal_dir_btn.setStyleSheet("background-color: #6A1B9A; color: white;")
+        self.load_xtal_dir_btn.clicked.connect(self.load_crystal_directory_dialog)
+        controls_layout.addWidget(self.load_xtal_dir_btn)
         
         controls_layout.addStretch()
         
@@ -243,11 +272,76 @@ class DataTab(QWidget):
         if file_path and self.data_manager:
             try:
                 self.data_manager.load_validation_data(file_path)
+                
+                # Auto-featurize validation data if training data has comp_* features
+                self._sync_validation_featurization()
+                
+                val_data = self.data_manager.validation_data
                 self.status_label.setText(
-                    f"Validation data loaded: {len(self.data_manager.validation_data)} samples"
+                    f"Validation data loaded: {len(val_data)} samples, "
+                    f"{len(val_data.columns)} columns"
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load validation data:\n{str(e)}")
+    
+    def _sync_validation_featurization(self):
+        """Apply featurizer to validation data if training data has comp_* features.
+        
+        This ensures validation data has the same feature columns as training data,
+        preventing 'comp_* not in index' errors during prepare_data().
+        """
+        if self.data_manager is None:
+            return
+        if self.data_manager.data is None or self.data_manager.validation_data is None:
+            return
+        
+        train_data = self.data_manager.data
+        val_data = self.data_manager.validation_data
+        
+        # Check if training has comp_* columns that validation is missing
+        train_comp_cols = [c for c in train_data.columns if c.startswith('comp_')]
+        val_has_comp = any(c.startswith('comp_') for c in val_data.columns)
+        
+        if not train_comp_cols or val_has_comp:
+            return  # No sync needed
+        
+        # Training has comp_* but validation doesn't - need to featurize validation
+        self.logger.info(
+            f"Training has {len(train_comp_cols)} comp_* columns that validation "
+            f"is missing. Auto-featurizing validation data..."
+        )
+        
+        # Find composition column in validation data
+        val_comp_col = None
+        for col in val_data.columns:
+            if col.lower() in ('formula', 'composition', 'chemical_formula'):
+                val_comp_col = col
+                break
+        
+        if val_comp_col is None:
+            self.logger.warning(
+                "Cannot auto-featurize validation: no 'formula' or 'composition' "
+                "column found. Validation data must have the same comp_* columns "
+                "as training data, or a 'formula' column for auto-featurization."
+            )
+            return
+        
+        # Apply same featurizer to validation data
+        try:
+            result = self.feature_engineer.add_composition_features(
+                val_data,
+                composition_column=val_comp_col,
+                use_magpie=True,
+                use_matminer=False
+            )
+            self.data_manager._validation_data = result
+            
+            new_comp_cols = [c for c in result.columns if c.startswith('comp_')]
+            self.logger.info(
+                f"Auto-featurized validation: {len(new_comp_cols)} comp_* columns added"
+            )
+        except Exception as e:
+            self.logger.warning(f"Auto-featurization of validation failed: {e}")
     
     def _update_data_preview(self):
         """Update data preview table."""
@@ -335,11 +429,43 @@ class DataTab(QWidget):
         comp_columns = self.data_manager.get_composition_columns()
         
         if not comp_columns:
-            QMessageBox.information(
-                self,
-                "Info",
-                "No composition columns detected in the dataset."
-            )
+            # v1.2.0: Check if dataset already has crystal structure features
+            # (auto-generated when loading CIF/POSCAR/XYZ files)
+            cols = list(self.data_manager._data.columns)
+            has_crystal_features = any(c.startswith('lattice_') for c in cols) and \
+                                   any(c.startswith('volume_per_atom') for c in cols)
+            
+            if has_crystal_features:
+                # Count crystal feature categories
+                n_lattice = sum(1 for c in cols if c.startswith('lattice_'))
+                n_comp = sum(1 for c in cols if c.startswith('comp_'))
+                n_magpie = sum(1 for c in cols if c.startswith('magpie_'))
+                n_adv = sum(1 for c in cols if c in ['mean_bond_length', 'mean_coordination_number',
+                          'rdf_peak_1', 'structure_complexity_index', 'lattice_anisotropy'])
+                
+                QMessageBox.information(
+                    self,
+                    "Crystal Features Already Present",
+                    f"This dataset already contains automatically-generated crystal "
+                    f"structure features ({len(cols)} total).\n\n"
+                    f"The following feature groups are already included:\n"
+                    f"  - Lattice features: ~{n_lattice}\n"
+                    f"  - Composition features: ~{n_comp}\n"
+                    f"  - Magpie descriptors: ~{n_magpie}\n"
+                    f"  - Advanced structural: ~{n_adv}\n\n"
+                    f"No additional featurization is needed for crystal structures. "
+                    f"The manual featurizer only works on CSV files with a "
+                    f"'formula' or 'composition' column containing chemical formulas "
+                    f"(e.g., 'Fe2O3', 'SiO2')."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Info",
+                    "No composition columns detected in the dataset.\n\n"
+                    "The featurizer requires a column named 'formula', 'composition', "
+                    "or 'chemical_formula' with chemical formulas (e.g., 'Fe2O3')."
+                )
             return
         
         try:
@@ -356,11 +482,37 @@ class DataTab(QWidget):
                         use_matminer=False    # Deshabilitado - requiere pymatgen
                     )
                     self.data_manager._data = result
+                    
+                    # FIX v1.2.0: Also apply featurizer to validation data if loaded
+                    # This ensures validation data has the same comp_* columns as training
+                    if (self.data_manager._validation_data is not None and 
+                            col in self.data_manager._validation_data.columns):
+                        try:
+                            val_result = self.feature_engineer.add_composition_features(
+                                self.data_manager._validation_data,
+                                composition_column=col,
+                                use_magpie=True,
+                                use_matminer=False
+                            )
+                            self.data_manager._validation_data = val_result
+                            self.logger.info(
+                                f"Applied featurizer to validation data: "
+                                f"{len(val_result.columns)} columns"
+                            )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Could not apply featurizer to validation data: {e}"
+                            )
             
-            # FIX: Actualizar feature columns despues de agregar nuevas features
+            # FIX: Actualizar feature columns despues de agregar nuevas features.
+            # v1.2.0: Solo columnas numericas — columnas string (structure_name,
+            # file paths, etc.) NO deben ser features.
             if self.data_manager._target_column:
+                numeric_cols = self.data_manager._data.select_dtypes(
+                    include=[np.number]
+                ).columns.tolist()
                 self.data_manager._feature_columns = [
-                    c for c in self.data_manager._data.columns 
+                    c for c in numeric_cols 
                     if c != self.data_manager._target_column
                 ]
             
@@ -388,6 +540,299 @@ class DataTab(QWidget):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply feature engineering:\n{str(e)}")
+    
+    # ------------------------------------------------------------------
+    # Crystal structure loading (v1.2.0)
+    # ------------------------------------------------------------------
+    
+    def load_crystal_dialog(self):
+        """Open dialog to load crystal structure files (CIF, POSCAR, XYZ)."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Load Crystal Structure Files",
+            "",
+            "CIF Files (*.cif);;POSCAR Files (POSCAR*);;VASP Files (*.poscar *.vasp);;"
+            "XYZ Files (*.xyz);;All Structure Files (*.cif *.poscar *.xyz *.vasp)"
+        )
+        
+        if file_paths:
+            self._load_crystal_structures(file_paths=file_paths)
+    
+    def load_crystal_directory_dialog(self):
+        """Open dialog to load a directory of crystal structures."""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Directory with Crystal Structures",
+            ""
+        )
+        
+        if directory:
+            self._load_crystal_structures(directory=directory)
+    
+    def _load_crystal_structures(self, file_paths=None, directory=None):
+        """Load and featurize crystal structures.
+        
+        Args:
+            file_paths: List of structure file paths
+            directory: Directory containing structure files
+        """
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText("Loading crystal structures...")
+        
+        try:
+            builder = CrystalStructureDatasetBuilder()
+            
+            if directory:
+                # Ask for target CSV
+                target_df = self._load_target_csv_dialog()
+                
+                if target_df is not None:
+                    df = builder.build_from_directory(
+                        directory,
+                        target_values=None,
+                        target_column='target'
+                    )
+                    # Merge with target
+                    df = self._merge_targets(df, target_df)
+                else:
+                    df = builder.build_from_directory(
+                        directory,
+                        target_values=None,
+                        target_column='target'
+                    )
+            else:
+                target_df = self._load_target_csv_dialog()
+                
+                if target_df is not None:
+                    df = builder.build_from_files(
+                        file_paths,
+                        target_values=None,
+                        target_column='target'
+                    )
+                    df = self._merge_targets(df, target_df)
+                else:
+                    df = builder.build_from_files(
+                        file_paths,
+                        target_values=None,
+                        target_column='target'
+                    )
+            
+            self.progress_bar.setVisible(False)
+            
+            if df.empty:
+                QMessageBox.warning(
+                    self, "Warning",
+                    "No crystal structure features extracted."
+                )
+                return
+            
+            # Store the DataFrame in data_manager
+            if self.data_manager is None:
+                self.data_manager = DataManager()
+            
+            self.data_manager._data = df
+            
+            # v1.2.0 FIX: Keep ONLY numeric columns as features.
+            # After merging with target CSV, non-numeric columns from the CSV
+            # (composition strings, file paths, etc.) would be included as features
+            # and one-hot encoded, exploding feature count from ~154 to 600+.
+            # We explicitly select only numeric columns, excluding structure_name
+            # and any target column.
+            target_col = 'target'  # default target column name
+            if target_col in df.columns:
+                # Identify which columns are numeric (excluding structure_name)
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                # Exclude the target column from features
+                self.data_manager._feature_columns = [
+                    c for c in numeric_cols if c != target_col
+                ]
+            else:
+                # No target yet — let user select it
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                self.data_manager._feature_columns = numeric_cols
+            
+            self.logger.info(
+                f"Crystal features: {len(self.data_manager._feature_columns)} numeric columns. "
+                f"Excluded: {[c for c in df.columns if c not in self.data_manager._feature_columns and c != target_col]}"
+            )
+            
+            # Update UI
+            info = self.data_manager._analyze_dataset()
+            
+            # Update target combo
+            self.target_combo.clear()
+            self.target_combo.addItems(list(info.columns.keys()))
+            
+            # Suggest 'target' column if present
+            if 'target' in info.columns:
+                self.target_combo.setCurrentText('target')
+                self.data_manager.set_target_column('target')
+                # Recalculate feature columns after target is set
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                self.data_manager._feature_columns = [
+                    c for c in numeric_cols if c != 'target'
+                ]
+            
+            self._update_data_preview()
+            self._update_column_details(info)
+            self._update_dataset_info(info)
+            
+            # Enable buttons
+            self.load_val_btn.setEnabled(True)
+            self.apply_prep_btn.setEnabled(True)
+            self.apply_fe_btn.setEnabled(True)
+            
+            if self.parent:
+                self.parent.data_tab = self
+            
+            self.status_label.setText(
+                f"Crystal structures: {len(df)} samples, {len(df.columns)} features"
+            )
+            
+            # Report any failed files
+            if builder.loader.failed_files:
+                failed_names = [Path(fp).name for fp, _ in builder.loader.failed_files]
+                QMessageBox.warning(
+                    self, "Partial Load",
+                    f"Loaded {len(df)} structures.\n"
+                    f"Failed to load {len(failed_names)} files:\n"
+                    + "\n".join(failed_names[:10])
+                    + ("\n..." if len(failed_names) > 10 else "")
+                )
+            else:
+                QMessageBox.information(
+                    self, "Success",
+                    f"Loaded {len(df)} crystal structures with "
+                    f"{len([c for c in df.columns if c not in ['structure_name', 'target']])} features.\n\n"
+                    f"Please select the target column and proceed to Training."
+                )
+            
+        except Exception as e:
+            self.progress_bar.setVisible(False)
+            QMessageBox.critical(
+                self, "Error",
+                f"Failed to load crystal structures:\n{str(e)}"
+            )
+    
+    def _load_target_csv_dialog(self) -> Optional[pd.DataFrame]:
+        """Ask user to load a CSV with target values and select target column.
+        
+        Only the 'structure_name' and the selected target column are returned.
+        All other columns (composition, file paths, extra properties) are
+        discarded to prevent them from being used as features.
+        
+        Returns:
+            DataFrame with 'structure_name' and ONE target column, or None
+        """
+        reply = QMessageBox.question(
+            self,
+            "Load Target Values?",
+            "Do you have a CSV file with target values for these structures?\n\n"
+            "The CSV must have:\n"
+            "- 'structure_name': name matching the structure files\n"
+            "- ONE target column: the property you want to predict\n\n"
+            "Other columns (composition, file paths, etc.) will be IGNORED.\n\n"
+            "Click 'Yes' to select the CSV, or 'No' to skip.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return None
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Target Values CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not file_path:
+            return None
+        
+        try:
+            df = pd.read_csv(file_path, index_col=False)
+            if 'structure_name' not in df.columns:
+                QMessageBox.warning(
+                    self, "Warning",
+                    "CSV must have a 'structure_name' column matching structure file names."
+                )
+                return None
+            
+            # Let user select which column is the target
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            target_candidates = [c for c in numeric_cols if c != 'structure_name']
+            
+            if not target_candidates:
+                QMessageBox.warning(
+                    self, "Warning",
+                    "No numeric columns found in CSV (besides structure_name)."
+                )
+                return None
+            
+            if len(target_candidates) == 1:
+                target_col = target_candidates[0]
+            else:
+                # Multiple numeric columns — ask user to select target
+                from PyQt6.QtWidgets import QInputDialog
+                target_col, ok = QInputDialog.getItem(
+                    self,
+                    "Select Target Column",
+                    f"Found {len(target_candidates)} numeric columns.\n"
+                    f"Which one is the property to predict?\n\n"
+                    f"Other columns will be IGNORED.",
+                    target_candidates,
+                    0,
+                    False
+                )
+                if not ok:
+                    return None
+            
+            # Return ONLY structure_name + selected target column
+            result = df[['structure_name', target_col]].copy()
+            self.logger.info(
+                f"Target CSV loaded: {len(result)} rows, target='{target_col}'. "
+                f"Ignored columns: {[c for c in df.columns if c not in result.columns]}"
+            )
+            return result
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Failed to load target CSV:\n{str(e)}")
+            return None
+    
+    @staticmethod
+    def _merge_targets(features_df: pd.DataFrame, target_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge target values into features DataFrame by structure_name.
+        
+        Args:
+            features_df: DataFrame with structure features and 'structure_name' column
+            target_df: DataFrame with 'structure_name' and ONE target column
+            
+        Returns:
+            Merged DataFrame
+        """
+        # Identify target column (single, all except structure_name)
+        target_cols = [c for c in target_df.columns if c != 'structure_name']
+        
+        if len(target_cols) > 1:
+            # This shouldn't happen with the new dialog, but handle defensively
+            from ..utils.logger import get_logger
+            logger = get_logger(__name__)
+            logger.warning(
+                f"Multiple target columns in CSV: {target_cols}. "
+                f"Using only the first: {target_cols[0]}"
+            )
+            target_cols = [target_cols[0]]
+        
+        # Keep only structure_name + target column from target_df
+        target_subset = target_df[['structure_name'] + target_cols]
+        
+        # Merge
+        merged = features_df.merge(
+            target_subset, on='structure_name', how='left'
+        )
+        
+        return merged
     
     def get_data_manager(self) -> DataManager:
         """Get the data manager."""

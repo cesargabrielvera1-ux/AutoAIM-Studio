@@ -172,19 +172,14 @@ class ResultsTab(QWidget):
                         if result is not None:
                             all_results.append((name, result, "Trained"))
             
-            # Get optimization results (all of them)
-            if hasattr(self.parent, 'optimization_tab'):
-                opt_tab = self.parent.optimization_tab
-                if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
-                    for model_name, opt_result in opt_tab.optimization_results:
-                        if opt_result is not None:
-                            all_results.append((
-                                f"{model_name} (Optimized)",
-                                opt_result,
-                                "Optimized"
-                            ))
+            # v1.2.0 FIX: Do NOT show optimization_results here.
+            # When the user clicks "Train with Best Parameters", a proper
+            # TrainingResult is created and registered in trainer.results.
+            # Showing the intermediate OptimizationResult alongside creates
+            # a confusing duplicate entry with the same metrics.
+            # The optimization details remain accessible in the Optimization tab.
             
-            # Get neural network results (all of them)
+            # Get neural network results (training only — not optimization)
             if hasattr(self.parent, 'nn_tab'):
                 nn_tab = self.parent.nn_tab
                 if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
@@ -196,15 +191,10 @@ class ResultsTab(QWidget):
                                 "Neural Network"
                             ))
                 
-                # Get NN optimization results
-                if hasattr(nn_tab, 'nn_optimizer_results') and nn_tab.nn_optimizer_results:
-                    for opt_name, opt_result in nn_tab.nn_optimizer_results:
-                        if opt_result is not None:
-                            all_results.append((
-                                f"{opt_name} (NN Optimized)",
-                                opt_result,
-                                "NN Optimized"
-                            ))
+                # v1.2.0 FIX: Do NOT show nn_optimizer_results.
+                # Same reason: "Apply Best Parameters + Train" creates a
+                # proper TrainingResult in nn_training_results. Showing
+                # the intermediate NN optimization result creates a duplicate.
             
             # Get ensemble results
             if hasattr(self.parent, 'ensemble_tab'):

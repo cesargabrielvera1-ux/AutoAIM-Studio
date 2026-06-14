@@ -673,3 +673,95 @@ class FeatureEngineer(LoggerMixin):
         self.logger.info(f"Added {len(aggregations)} statistical features")
         
         return result
+    
+    # ------------------------------------------------------------------
+    # Crystal structure features (v1.3.0 — NO matminer, pymatgen only)
+    # ------------------------------------------------------------------
+    
+    def add_crystal_structure_features(
+        self,
+        data: pd.DataFrame,
+        structure_column: str = 'structure'
+    ) -> pd.DataFrame:
+        """Add crystallographic features from pymatgen Structure objects.
+        
+        Extracts ~25 numeric descriptors from crystal structures using only
+        pymatgen (no matminer). Output feeds directly into the AutoAIM
+        training pipeline.
+        
+        Args:
+            data: DataFrame containing a column with pymatgen Structure objects
+            structure_column: Name of column with Structure objects
+            
+        Returns:
+            DataFrame with added crystal features (original data + new features)
+        """
+        if structure_column not in data.columns:
+            raise ValueError(f"Column '{structure_column}' not found in data")
+        
+        try:
+            from .crystal_structure import CrystalStructureFeaturizer
+        except ImportError as e:
+            self.logger.error(f"Cannot import CrystalStructureFeaturizer: {e}")
+            return data
+        
+        featurizer = CrystalStructureFeaturizer()
+        result = featurizer.featurize_dataframe(data, structure_column)
+        
+        self._transformers['crystal_structure'] = featurizer
+        
+        self.logger.info(
+            f"Added crystal structure features. "
+            f"Shape: {data.shape} -> {result.shape}"
+        )
+        
+        return result
+    
+    def featurize_structures(
+        self,
+        structures: List[Tuple[str, 'Structure']],
+        target_values: Optional[Dict[str, float]] = None,
+        target_column: str = 'target'
+    ) -> pd.DataFrame:
+        """Convert a list of pymatgen Structures to a training-ready DataFrame.
+        
+        This is the main entry point for crystal structure workflows in v1.3.0.
+        Loads structures, extracts crystallographic features, and optionally
+        attaches target values to produce a DataFrame ready for DataManager.
+        
+        Args:
+            structures: List of (name, Structure) tuples
+            target_values: Optional dict mapping structure_name -> target value
+            target_column: Name for the target column
+            
+        Returns:
+            DataFrame with crystal features + target, ready for DataManager
+        """
+        from .crystal_structure import CrystalStructureFeaturizer
+        
+        featurizer = CrystalStructureFeaturizer()
+        features_df = featurizer.featurize_structures(structures)
+        
+        if features_df.empty:
+            raise ValueError("No features extracted from structures")
+        
+        # Keep only numeric columns
+        numeric_cols = features_df.select_dtypes(include=[np.number]).columns
+        features_df = features_df[numeric_cols].astype(float)
+        
+        # Add target values if provided
+        if target_values and 'structure_name' in features_df.columns:
+            features_df[target_column] = features_df['structure_name'].map(target_values)
+            n_missing = features_df[target_column].isna().sum()
+            if n_missing > 0:
+                self.logger.warning(
+                    f"{n_missing} structures have no target value and will be dropped"
+                )
+                features_df = features_df.dropna(subset=[target_column])
+        
+        self.logger.info(
+            f"Structure dataset: {len(features_df)} samples, "
+            f"{len(features_df.columns)} features"
+        )
+        
+        return features_df

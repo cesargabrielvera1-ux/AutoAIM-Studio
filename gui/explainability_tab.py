@@ -648,20 +648,20 @@ class ExplainabilityTab(QWidget):
         self.importance_table.clearContents()
         self.importance_table.setRowCount(len(df))
         
-        for i, row in df.iterrows():
-            self.importance_table.setItem(i, 0, QTableWidgetItem(str(row['feature'])))
+        for row_idx, (_, row) in enumerate(df.iterrows()):
+            self.importance_table.setItem(row_idx, 0, QTableWidgetItem(str(row['feature'])))
             
             # Model importance (N/A for NN)
             if 'model_importance' in row and pd.notna(row['model_importance']):
-                self.importance_table.setItem(i, 1, QTableWidgetItem(f"{row['model_importance']:.4f}"))
+                self.importance_table.setItem(row_idx, 1, QTableWidgetItem(f"{row['model_importance']:.4f}"))
             else:
-                self.importance_table.setItem(i, 1, QTableWidgetItem("N/A"))
+                self.importance_table.setItem(row_idx, 1, QTableWidgetItem("N/A"))
             
             # Permutation importance
             if 'permutation_importance' in row and pd.notna(row['permutation_importance']):
-                self.importance_table.setItem(i, 2, QTableWidgetItem(f"{row['permutation_importance']:.4f}"))
+                self.importance_table.setItem(row_idx, 2, QTableWidgetItem(f"{row['permutation_importance']:.4f}"))
             else:
-                self.importance_table.setItem(i, 2, QTableWidgetItem("N/A"))
+                self.importance_table.setItem(row_idx, 2, QTableWidgetItem("N/A"))
             
             # SHAP importance
             if 'shap_importance' in row and pd.notna(row['shap_importance']):

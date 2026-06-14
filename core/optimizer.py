@@ -189,7 +189,7 @@ class HyperparameterOptimizer(LoggerMixin):
                 params[param_name] = self._suggest_param(trial, param_name, min_val, max_val, param_type)
             
             # Create and evaluate model
-            # NOTE: SVR/SVC and KNeighbors do not accept random_state
+            # NOTE: SVR/SVC and KNeighbors do NOT accept random_state
             if algorithm in ('Support Vector Machine', 'k-Nearest Neighbors'):
                 model = model_class(**params)
             else:
@@ -226,7 +226,7 @@ class HyperparameterOptimizer(LoggerMixin):
         
         # Train best model
         best_params = study.best_params
-        # NOTE: SVR/SVC and KNeighbors do not accept random_state
+        # NOTE: SVR/SVC and KNeighbors do NOT accept random_state
         if algorithm in ('Support Vector Machine', 'k-Nearest Neighbors'):
             best_model = model_class(**best_params)
         else:
@@ -373,12 +373,6 @@ class HyperparameterOptimizer(LoggerMixin):
             # Training parameters
             learning_rate = _suggest_with_ranges(trial, 'learning_rate', param_ranges)
             batch_size = _suggest_with_ranges(trial, 'batch_size', param_ranges)
-            # Categorical values may come as strings - convert to proper types
-            if isinstance(batch_size, str):
-                batch_size = int(batch_size)
-            batch_norm = _suggest_with_ranges(trial, 'batch_norm', param_ranges)
-            if isinstance(batch_norm, str):
-                batch_norm = batch_norm.lower() == 'true'
             weight_decay = _suggest_with_ranges(trial, 'weight_decay', param_ranges)
             optimizer_name = _suggest_with_ranges(trial, 'optimizer', param_ranges)
             

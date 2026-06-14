@@ -189,6 +189,9 @@ class DataManager(LoggerMixin):
             
             self.logger.info(f"Loaded validation data: {len(self._validation_data)} rows, {len(self._validation_data.columns)} columns")
             
+            # Auto-featurize validation data if training data has comp_* columns
+            self._sync_validation_features()
+            
             return self._analyze_dataset(self._validation_data)
             
         except Exception as e:
@@ -294,6 +297,52 @@ class DataManager(LoggerMixin):
         
         return False
     
+    def _sync_validation_features(self) -> None:
+        """Apply same featurization to validation data as training data.
+        
+        If training data has Magpie composition features (comp_*) but
+        validation data doesn't, auto-apply Magpie featurizer if the
+        validation data has a 'formula' column.
+        """
+        if self._data is None or self._validation_data is None:
+            return
+        
+        training_cols = set(self._data.columns)
+        val_cols = set(self._validation_data.columns)
+        
+        # Check if training has comp_* columns that validation is missing
+        missing_comp = [c for c in training_cols 
+                       if c.startswith('comp_') and c not in val_cols]
+        
+        if not missing_comp:
+            return  # All good, no missing featurized columns
+        
+        if 'formula' not in self._validation_data.columns:
+            self.logger.warning(
+                f"Validation data missing {len(missing_comp)} featurized columns "
+                f"(comp_*) and has no 'formula' column to regenerate them. "
+                f"Please either: (1) include 'formula' in validation CSV, or "
+                f"(2) pre-featurize validation data with same featurizer."
+            )
+            return
+        
+        # Auto-apply Magpie featurizer to validation data
+        try:
+            from .feature_engineering import MagpieFeatures
+            magpie = MagpieFeatures(composition_column='formula')
+            self._validation_data = magpie.transform(self._validation_data)
+            new_cols = [c for c in self._validation_data.columns 
+                       if c.startswith('comp_')]
+            self.logger.info(
+                f"Auto-featurized validation data: {len(new_cols)} Magpie "
+                f"columns added (was missing {len(missing_comp)})."
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Could not auto-featurize validation data: {e}. "
+                f"Validation may fail if column mismatch persists."
+            )
+    
     def set_target_column(self, column: str) -> None:
         """Set the target column for prediction.
         
@@ -307,7 +356,22 @@ class DataManager(LoggerMixin):
             raise ValueError(f"Column '{column}' not found in dataset")
         
         self._target_column = column
-        self._feature_columns = [c for c in self._data.columns if c != column]
+        
+        # v1.2.0 FIX: Use ONLY numeric columns as features.
+        # String columns (structure_name, file paths, composition strings,
+        # etc.) must NOT be included in _feature_columns. If they are,
+        # the OneHotEncoder in get_preprocessor() will create one feature
+        # per unique string value, exploding the feature count from ~154
+        # to 600+ and making prediction impossible on new data.
+        numeric_cols = self._data.select_dtypes(include=[np.number]).columns.tolist()
+        self._feature_columns = [c for c in numeric_cols if c != column]
+        
+        # Log what was excluded
+        excluded = [c for c in self._data.columns if c not in self._feature_columns and c != column]
+        if excluded:
+            self.logger.info(
+                f"Excluded {len(excluded)} non-numeric columns from features: {excluded}"
+            )
         
         # Determine if classification or regression
         target_series = self._data[column]
@@ -327,8 +391,11 @@ class DataManager(LoggerMixin):
             for col_info in self._dataset_info.columns.values():
                 col_info.is_target = (col_info.name == column)
         
-        self.logger.info(f"Target column set to '{column}' "
-                        f"({'classification' if self._is_classification else 'regression'})")
+        self.logger.info(
+            f"Target column set to '{column}' "
+            f"({'classification' if self._is_classification else 'regression'}), "
+            f"features: {len(self._feature_columns)} numeric columns"
+        )
     
     def get_composition_columns(self) -> List[str]:
         """Get list of columns identified as chemical compositions.
@@ -495,7 +562,12 @@ class DataManager(LoggerMixin):
         except Exception:
             self._processed_feature_names = self._feature_columns
         
-        return X_train_processed, X_test_processed, y_train.values, y_test.values
+        # FIX: Convert y to numpy arrays safely. After LabelEncoder, y is ndarray
+        # which doesn't have .values. np.asarray() works for both pd.Series and ndarray.
+        y_train_arr = np.asarray(y_train)
+        y_test_arr = np.asarray(y_test)
+        
+        return X_train_processed, X_test_processed, y_train_arr, y_test_arr
     
     def get_feature_names(self) -> List[str]:
         """Get feature names after preprocessing.

@@ -177,7 +177,7 @@ class ModelRegistry(LoggerMixin):
                         'reg_lambda': 1.0,
                         'random_state': 42,
                         'n_jobs': self._hardware.info.recommended_n_jobs,
-                        'tree_method': 'auto'
+                        'tree_method': 'gpu_hist' if gpu_available else 'hist'
                     },
                     param_ranges={
                         'n_estimators': (10, 2000, 'int'),

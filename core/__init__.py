@@ -12,6 +12,11 @@ from .explainer import ModelExplainer
 from .validator import MaterialsAwareValidator
 from .inference_engine import InferenceEngine
 from .ensemble_trainer import EnsembleTrainer, EnsembleResult
+from .crystal_structure import (
+    CrystalStructureLoader,
+    CrystalStructureFeaturizer,
+    CrystalStructureDatasetBuilder,
+)
 
 __all__ = [
     'DataManager',
@@ -33,4 +38,7 @@ __all__ = [
     'InferenceEngine',
     'EnsembleTrainer',
     'EnsembleResult',
+    'CrystalStructureLoader',
+    'CrystalStructureFeaturizer',
+    'CrystalStructureDatasetBuilder',
 ]
