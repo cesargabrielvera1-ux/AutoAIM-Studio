@@ -189,25 +189,55 @@ Load crystal structure supported formats by individually selecting them or loadi
 <img width="1279" height="748" alt="Captura de pantalla 2026-06-14 091005" src="https://github.com/user-attachments/assets/3376b5ae-923f-472e-94e7-3896accbab94" />
 The same interface you love remains untouched with same funcionality.
 
-## Neural Network Training and Optimization Tab
-<img width="2559" height="1496" alt="Captura de pantalla 2026-05-20 113623" src="https://github.com/user-attachments/assets/ebbbfe77-7334-4ffc-ac60-3d91838ad91b" />
-Build a custom Neural Network and train it, or select optimization ranges and optimize! Apply best hyperparameters and retrain.
+## Regressors Training Tab
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-25 115739" src="https://github.com/user-attachments/assets/1620af9c-d24b-4371-8fcb-e4b13b60b1da" />
+Train one or all regressors with Default parameters or click "Train with Custom Parameters" button to manually configure them.
+
+## Train with Custom Parameters Pop up Tab
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-25 115739" src="https://github.com/user-attachments/assets/6a496fc7-2874-4830-abb3-355cc0a09073" />
+Manually select training parameters for every regressor you want to train. Configure CV Folds and Random State.
 
 ## Regressors Optimization Tab
-<img width="2556" height="1495" alt="Captura de pantalla 2026-05-20 113637" src="https://github.com/user-attachments/assets/00b5af58-d198-479a-9916-a17662871673" />
-Select optimization ranges for each regressor and optimize. Apply best hyperparameters found and train!
+<img width="1279" height="764" alt="Captura 3" src="https://github.com/user-attachments/assets/c31d265a-2a6e-488a-8c7e-0ec65111cbf9" />
+Optimize any regressor. Configure number of trails, Random State, CV Folds and Parameter Optimization Ranges.
 
-## Ensemble Models Optimization Tab
-<img width="2559" height="1492" alt="Captura de pantalla 2026-05-20 113741" src="https://github.com/user-attachments/assets/bb6c0ec1-9c9f-4f37-8837-aaaeed9147b3" />
-Optimize weights of custom ensemble models.
+## Rgressors Optimization Tab Optimization Details
+<img width="1279" height="763" alt="Captura4" src="https://github.com/user-attachments/assets/f8e9beba-8bae-4313-b1b5-5ba8d1e7695a" />
+Optimization details are shown on the right. TOptimization progress, Optimization Results and Best Trail Details.
 
-## Model Training 
-<img width="2559" height="1529" alt="Figure-1" src="https://github.com/user-attachments/assets/5ba246af-7c5f-4461-91cd-99902c748fd1" />
-Multiple models training simultaneously
+## Ensemble Tab
+<img width="1279" height="764" alt="Ensamble" src="https://github.com/user-attachments/assets/75f7a0f3-7b10-41b3-9e14-2c08993de563" />
+Train custom Ensemble models. You can choose either Optimizer weights or try with custom weights.
+
+
+## Neural Network Training and Optimization Tab
+<img width="1279" height="763" alt="NN-Tab1" src="https://github.com/user-attachments/assets/26e7669a-d6c2-418a-b653-6380eed49c10" />
+Completely redesigned Neural Network Tab! Build a custom Neural Network and train it, or select optimization ranges and optimize! Apply best hyperparameters and retrain. You can see results in real time.
+
+
+## Neural Network Custom Optimization Ranges
+<img width="1279" height="762" alt="NN-2" src="https://github.com/user-attachments/assets/f5f6aff0-d631-44a9-a2c3-5d84c4b8524d" />
+As for all regressors, you can now set optimization ranges prior optimizing your NN.
+
+## Neural Network Optimization and Training Progress
+<img width="1279" height="763" alt="NN-3" src="https://github.com/user-attachments/assets/ff17118d-bc75-4a2f-99d3-8d9c0c707df4" />
+Watch results in real time as NN Train or Optimize.
 
 ## Results Tab
-<img width="2559" height="1526" alt="Figure-2" src="https://github.com/user-attachments/assets/d478eefb-3d7e-4597-989f-3abe60b0ff06" />
-Mutiple results showing in real time
+<img width="1279" height="763" alt="Results-1" src="https://github.com/user-attachments/assets/58c2e759-cb3d-4392-a1ad-1a2a912680ef" />
+See all results. Delete them or request details. You can export them as Model Bundles for further predictions, generate Learning Curves data and more!
+
+## Results Tab Details
+<img width="1279" height="763" alt="Results-2" src="https://github.com/user-attachments/assets/8526e616-9b5b-457b-ba6a-3fba8bfea4ba" />
+When clicking Details button on any trained or optimized model AutoAIM shows Metrics, importance and CV results per fold.
+
+## Explainability
+<img width="1279" height="763" alt="SHAP" src="https://github.com/user-attachments/assets/aa87ea15-f2b4-49ed-ad4b-30d08e9c8bbb" />
+Compute explainability analysis with just a few clicks.
+
+## Predict.
+<img width="1279" height="763" alt="Predict" src="https://github.com/user-attachments/assets/d98c5569-94b3-404c-ac98-93704ad322c4" />
+Load a Model Bundle, load your prediction data and predict in seconds!
 
 ---
 
