@@ -17,8 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+
 
 from ..core.inference_engine import InferenceEngine, LegacyInferenceEngine
 from ..core.crystal_structure import (
@@ -79,6 +78,7 @@ class InferenceTab(QWidget, LoggerMixin):
         
         # === TOP SECTION: Model Loading ===
         model_group = QGroupBox("Load Model")
+        model_group.setMinimumHeight(120)
         model_layout = QVBoxLayout(model_group)
         
         # Model path selection
@@ -98,7 +98,7 @@ class InferenceTab(QWidget, LoggerMixin):
         # Model info display
         self.model_info_text = QTextEdit()
         self.model_info_text.setReadOnly(True)
-        self.model_info_text.setMaximumHeight(150)
+        self.model_info_text.setMaximumHeight(100)
         self.model_info_text.setPlaceholderText("Model information will appear here after loading...")
         model_layout.addWidget(self.model_info_text)
         
@@ -111,6 +111,7 @@ class InferenceTab(QWidget, LoggerMixin):
         
         # === MIDDLE SECTION: Data Loading ===
         data_group = QGroupBox("Data for Prediction")
+        data_group.setMinimumHeight(180)
         data_layout = QVBoxLayout(data_group)
         
         # Data file selection
@@ -146,16 +147,11 @@ class InferenceTab(QWidget, LoggerMixin):
         splitter.addWidget(data_group)
         
         # === CRYSTAL STRUCTURE SECTION (v1.2.0) ===
+        # Compact single-row layout with buttons + status
         xtal_group = QGroupBox("Crystal Structures for Prediction (v1.2)")
         xtal_layout = QVBoxLayout(xtal_group)
-        
-        xtal_info = QLabel(
-            "Load CIF, POSCAR, or XYZ files to predict on crystal structures. "
-            "Structures will be automatically featurized using the same pipeline as training."
-        )
-        xtal_info.setWordWrap(True)
-        xtal_info.setStyleSheet("color: #888888; font-size: 9pt;")
-        xtal_layout.addWidget(xtal_info)
+        xtal_layout.setSpacing(5)
+        xtal_layout.setContentsMargins(8, 8, 8, 8)
         
         xtal_btn_layout = QHBoxLayout()
         
@@ -174,7 +170,7 @@ class InferenceTab(QWidget, LoggerMixin):
         xtal_btn_layout.addStretch()
         
         self.xtal_status_label = QLabel("No crystal structures loaded")
-        self.xtal_status_label.setStyleSheet("padding: 5px; border-radius: 3px;")
+        self.xtal_status_label.setStyleSheet("padding: 5px; border-radius: 3px; font-size: 9pt;")
         xtal_btn_layout.addWidget(self.xtal_status_label)
         
         xtal_layout.addLayout(xtal_btn_layout)
@@ -182,9 +178,12 @@ class InferenceTab(QWidget, LoggerMixin):
         splitter.addWidget(xtal_group)
         
         # === BOTTOM SECTION: Prediction & Results ===
+        # This section is OUTSIDE the splitter to always remain visible
         bottom_widget = QWidget()
+        bottom_widget.setMinimumHeight(120)
         bottom_layout = QVBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(6)
         
         # Prediction button
         self.predict_btn = QPushButton("Run Prediction")
@@ -234,20 +233,19 @@ class InferenceTab(QWidget, LoggerMixin):
         self.results_table.setMaximumHeight(200)
         results_layout.addWidget(self.results_table)
         
-        # Prediction distribution plot
-        self.plot_frame = QFrame()
-        self.plot_layout = QVBoxLayout(self.plot_frame)
-        self.figure = plt.Figure(figsize=(6, 3))
-        self.canvas = FigureCanvas(self.figure)
-        self.plot_layout.addWidget(self.canvas)
-        results_layout.addWidget(self.plot_frame)
+
         
         bottom_layout.addWidget(results_group)
         
         splitter.addWidget(bottom_widget)
         
-        # Set splitter proportions
-        splitter.setSizes([200, 300, 400])
+        # Set splitter proportions: model(150) + data(250) + xtal(80) + bottom(320)
+        # Total = 800. The bottom section (Run Prediction + Results) must always be visible.
+        splitter.setSizes([150, 250, 80, 320])
+        splitter.setStretchFactor(0, 0)  # Model: fixed minimum
+        splitter.setStretchFactor(1, 1)  # Data: can grow
+        splitter.setStretchFactor(2, 0)  # Crystal: fixed minimum (compact)
+        splitter.setStretchFactor(3, 0)  # Bottom: fixed (always visible)
     
     def _browse_model(self):
         """Browse for model folder or file."""
@@ -362,7 +360,7 @@ class InferenceTab(QWidget, LoggerMixin):
 It has {n_features} features including {len(id_like_features)} one-hot encoded ID columns
 (structure_name, formula, file paths). These should NOT be features.<br>
 <b>Crystal structure prediction will NOT work.</b> Please retrain the model
-with AutoAIM Studio v1.2.0 or later.
+with AutoAIM Studio v1.3.0 or later.
                 """
             self.model_info_text.setHtml(info_text)
             
@@ -384,7 +382,7 @@ with AutoAIM Studio v1.2.0 or later.
                 if has_id_bug:
                     self.version_warning_label.setText(
                         f"⚠️ Model has {n_features} features (ID bug detected). "
-                        f"Retrain with v1.2.0 for crystal structure prediction."
+                        f"Retrain with v1.3.0 for crystal structure prediction."
                     )
                 else:
                     self.version_warning_label.setText("")
@@ -549,6 +547,27 @@ with AutoAIM Studio v1.2.0 or later.
                 QMessageBox.critical(self, "Error Loading Model", str(e))
                 return
         
+        # v1.3.0: Validate feature count before predicting
+        # Compare only columns that exist in the manifest (ignore target/extra columns)
+        manifest_features = self.inference_engine.manifest.get('feature_names', [])
+        input_feature_cols = [c for c in self.input_data.columns if c in manifest_features]
+        input_features = len(input_feature_cols)
+        expected_features = len(manifest_features)
+        if input_features != expected_features:
+            missing = [c for c in manifest_features if c not in self.input_data.columns]
+            reply = QMessageBox.warning(
+                self, "Feature Count Mismatch",
+                f"Input data has {input_features} matching features but model "
+                f"'{self.inference_engine.manifest.get('model_name', 'unknown')}' "
+                f"expects {expected_features} features.\n\n"
+                f"Missing: {missing}\n\n"
+                f"Do you want to continue anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                self.predict_btn.setEnabled(True)
+                return
+        
         # Run prediction in thread
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
@@ -627,24 +646,6 @@ Std: {predictions.std():.4f}
                 self.results_table.setItem(i, j, item)
         
         self.results_table.resizeColumnsToContents()
-        
-        # Update plot
-        self._update_prediction_plot(predictions)
-    
-    def _update_prediction_plot(self, predictions: pd.Series):
-        """Update prediction distribution plot."""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        
-        ax.hist(predictions, bins=30, edgecolor='black', alpha=0.7, color='#0d7377')
-        ax.set_xlabel('Prediction Value')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Distribution of Predictions')
-        ax.axvline(predictions.mean(), color='red', linestyle='--', label=f'Mean: {predictions.mean():.4f}')
-        ax.legend()
-        
-        self.figure.tight_layout()
-        self.canvas.draw()
     
     def _export_results(self):
         """Export prediction results to CSV."""
@@ -735,7 +736,7 @@ Std: {predictions.std():.4f}
                     f"{len(id_features)} one-hot encoded ID columns (structure names, formulas, "
                     f"file paths). These are NOT valid features and will not generalize to "
                     f"new structures.\n\n"
-                    f"SOLUTION: Retrain the model using AutoAIM Studio v1.2.0 or later.\n"
+                    f"SOLUTION: Retrain the model using AutoAIM Studio v1.3.0 or later.\n"
                     f"The new training pipeline correctly keeps only ~154 numeric "
                     f"crystallographic descriptors (structure_name is kept as index, "
                     f"not as a one-hot encoded feature).\n\n"

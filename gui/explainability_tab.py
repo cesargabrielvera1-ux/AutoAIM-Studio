@@ -665,15 +665,15 @@ class ExplainabilityTab(QWidget):
             
             # SHAP importance
             if 'shap_importance' in row and pd.notna(row['shap_importance']):
-                self.importance_table.setItem(i, 3, QTableWidgetItem(f"{row['shap_importance']:.4f}"))
+                self.importance_table.setItem(row_idx, 3, QTableWidgetItem(f"{row['shap_importance']:.4f}"))
             else:
-                self.importance_table.setItem(i, 3, QTableWidgetItem("N/A"))
+                self.importance_table.setItem(row_idx, 3, QTableWidgetItem("N/A"))
             
             # Average rank
             if 'average_rank' in row and pd.notna(row['average_rank']):
-                self.importance_table.setItem(i, 4, QTableWidgetItem(f"{row['average_rank']:.4f}"))
+                self.importance_table.setItem(row_idx, 4, QTableWidgetItem(f"{row['average_rank']:.4f}"))
             else:
-                self.importance_table.setItem(i, 4, QTableWidgetItem("N/A"))
+                self.importance_table.setItem(row_idx, 4, QTableWidgetItem("N/A"))
     
     def _explain_prediction(self):
         """Explain a single prediction."""

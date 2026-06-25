@@ -257,9 +257,13 @@ class ModelTrainer(LoggerMixin):
         
         training_time = time.time() - start_time
         
+        # v1.3.0 FIX: Use _get_unique_model_name() so multiple NNs don't overwrite each other.
+        # Same mechanism as train() for sklearn models.
+        unique_name = self._get_unique_model_name(model_name)
+        
         result = TrainingResult(
             model=nn_builder,
-            model_name=model_name,
+            model_name=unique_name,
             problem_type=problem_type,
             metrics=metrics,
             cv_metrics=cv_metrics,
@@ -271,7 +275,7 @@ class ModelTrainer(LoggerMixin):
             nn_history=history
         )
         
-        self._results[model_name] = result
+        self._results[unique_name] = result
         
         self.logger.info(
             f"Neural Network training complete in {training_time:.2f}s. "

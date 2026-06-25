@@ -27,6 +27,51 @@ class EnsembleResult:
     true_values: Optional[np.ndarray] = None
     optimized_weights: Optional[Dict[str, float]] = None
     optimization_trials: int = 0
+    base_models: Optional[Dict[str, Any]] = None  # v1.3.0: Store base models for prediction
+    
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Generate predictions using stored base models and weights.
+        
+        Args:
+            X: Feature matrix (n_samples, n_features)
+            
+        Returns:
+            Ensemble predictions (n_samples,)
+        """
+        if self.base_models is None:
+            raise RuntimeError(
+                "This ensemble was loaded from a saved bundle and its base models "
+                "are not available. Re-train the ensemble in the current session "
+                "to enable predictions, or use the individual base models directly."
+            )
+        
+        # Get predictions from each available base model
+        model_predictions = {}
+        for name in self.model_names:
+            if name in self.base_models:
+                model = self.base_models[name]
+                try:
+                    model_predictions[name] = model.predict(X)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to predict with base model '{name}': {e}")
+        
+        if not model_predictions:
+            raise RuntimeError("No base models available for prediction")
+        
+        # Weighted average
+        if self.ensemble_type == 'weighted_average':
+            total_weight = 0.0
+            weighted_sum = np.zeros(len(X))
+            for name, preds in model_predictions.items():
+                w = self.weights.get(name, 1.0 / len(model_predictions))
+                weight = w / sum(self.weights.values())
+                weighted_sum += weight * preds
+                total_weight += weight
+            return weighted_sum
+        
+        # Stacking (simple average of available models if meta-learner not stored)
+        preds_array = np.array(list(model_predictions.values()))
+        return np.mean(preds_array, axis=0)
 
 
 class EnsembleTrainer(LoggerMixin):
@@ -50,7 +95,9 @@ class EnsembleTrainer(LoggerMixin):
         X_test: Optional[np.ndarray] = None,
         y_test: Optional[np.ndarray] = None,
         cv_folds: int = 5,
-        progress_callback: Optional[Callable[[str, float], None]] = None
+        random_state: int = 42,
+        progress_callback: Optional[Callable[[str, float], None]] = None,
+        weights: Optional[Dict[str, float]] = None
     ) -> EnsembleResult:
         """Train an ensemble of models.
         
@@ -104,8 +151,18 @@ class EnsembleTrainer(LoggerMixin):
         if progress_callback:
             progress_callback(f"Computing ensemble with {len(predictions)} models...", 0.3)
         
-        # Calculate weights (equal by default)
-        weights = {name: 1.0 / len(predictions) for name in predictions}
+        # Calculate weights (custom > equal default)
+        if weights is not None:
+            # Validate and normalize custom weights
+            valid_weights = {name: weights.get(name, 1.0) for name in predictions}
+            total = sum(valid_weights.values())
+            if total > 0:
+                valid_weights = {name: w / total for name, w in valid_weights.items()}
+            else:
+                valid_weights = {name: 1.0 / len(predictions) for name in predictions}
+            weights = valid_weights
+        else:
+            weights = {name: 1.0 / len(predictions) for name in predictions}
         
         # Compute ensemble predictions
         if ensemble_type == 'weighted_average':
@@ -142,7 +199,7 @@ class EnsembleTrainer(LoggerMixin):
                 progress_callback(f"Running {cv_folds}-fold CV...", 0.8)
             
             try:
-                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
                 
                 for train_idx, val_idx in kf.split(X_train):
                     X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
@@ -189,6 +246,12 @@ class EnsembleTrainer(LoggerMixin):
         
         training_time = time.time() - start_time
         
+        # v1.3.0: Store base models for later prediction
+        base_models = {}
+        for name in predictions.keys():
+            if name in self.trainer.results:
+                base_models[name] = self.trainer.results[name].model
+        
         result = EnsembleResult(
             ensemble_type=ensemble_type,
             model_names=list(predictions.keys()),
@@ -198,7 +261,8 @@ class EnsembleTrainer(LoggerMixin):
             training_time=training_time,
             problem_type=problem_type,
             predictions=ensemble_pred,
-            true_values=y_test
+            true_values=y_test,
+            base_models=base_models
         )
         
         ensemble_name = f"Ensemble_{ensemble_type}_{len(self.results) + 1}"
@@ -218,6 +282,7 @@ class EnsembleTrainer(LoggerMixin):
         model_names: Optional[List[str]] = None,
         n_trials: int = 50,
         cv_folds: int = 5,
+        random_state: int = 42,
         progress_callback: Optional[Callable[[int, float, Dict], None]] = None
     ) -> EnsembleResult:
         """Optimize ensemble weights using Bayesian optimization.
@@ -318,7 +383,7 @@ class EnsembleTrainer(LoggerMixin):
 
             # Evaluate with cross-validation
             scores = []
-            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
             for train_idx, val_idx in kf.split(X):
                 y_val = y[val_idx]
@@ -354,7 +419,7 @@ class EnsembleTrainer(LoggerMixin):
         # Create and run study
         study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42)
+            sampler=optuna.samplers.TPESampler(seed=random_state)
         )
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
@@ -391,6 +456,12 @@ class EnsembleTrainer(LoggerMixin):
             metrics['cv_acc_mean'] = float(np.mean(best_cv_scores)) if best_cv_scores else 0.0
 
         training_time = time.time() - start_time
+        
+        # v1.3.0: Store base models for later prediction
+        base_models = {}
+        for name in model_names:
+            if name in self.trainer.results:
+                base_models[name] = self.trainer.results[name].model
 
         result = EnsembleResult(
             ensemble_type='weighted_average',
@@ -403,7 +474,8 @@ class EnsembleTrainer(LoggerMixin):
             predictions=ensemble_pred,
             true_values=y,
             optimized_weights=best_weights,
-            optimization_trials=n_trials
+            optimization_trials=n_trials,
+            base_models=base_models
         )
 
         ensemble_name = f"Ensemble_WeightedOptimized_{len(self.results) + 1}"

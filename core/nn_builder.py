@@ -446,7 +446,8 @@ class NeuralNetworkBuilder(LoggerMixin):
         l1_reg: float = 0.0,
         l2_reg: float = 0.0,
         early_stopping_patience: int = 50,
-        early_stopping_min_delta: float = 1e-4
+        early_stopping_min_delta: float = 1e-4,
+        gradient_clip_val: float = 1.0
     ) -> TrainingConfig:
         """Create training configuration.
         
@@ -461,6 +462,7 @@ class NeuralNetworkBuilder(LoggerMixin):
             l2_reg: L2 regularization
             early_stopping_patience: Patience for early stopping
             early_stopping_min_delta: Minimum delta for early stopping
+            gradient_clip_val: Max gradient norm for clipping (0 to disable)
             
         Returns:
             Training configuration
@@ -475,7 +477,8 @@ class NeuralNetworkBuilder(LoggerMixin):
             l1_reg=l1_reg,
             l2_reg=l2_reg,
             early_stopping_patience=early_stopping_patience,
-            early_stopping_min_delta=early_stopping_min_delta
+            early_stopping_min_delta=early_stopping_min_delta,
+            gradient_clip_val=gradient_clip_val
         )
         
         return self._training_config

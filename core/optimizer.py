@@ -290,7 +290,11 @@ class HyperparameterOptimizer(LoggerMixin):
         param_ranges: Optional[Dict[str, Tuple]] = None,
         study_name: str = "nn_optimization",
         progress_callback: Optional[Callable[[int, float, Dict], None]] = None,
-        random_state: int = 42
+        random_state: int = 42,
+        opt_epochs: int = 200,
+        cv_epochs: int = 100,
+        opt_patience: int = 30,
+        cv_patience: int = 20
     ) -> OptimizationResult:
         """Optimize neural network architecture and hyperparameters.
         
@@ -310,10 +314,18 @@ class HyperparameterOptimizer(LoggerMixin):
             study_name: Study name
             progress_callback: Callback(trial_num, score, params)
             random_state: Random seed
+            opt_epochs: Epochs per trial when using simple validation (default: 200)
+            cv_epochs: Epochs per fold when using K-fold CV (default: 100)
+            opt_patience: Early stopping patience for simple validation (default: 30)
+            cv_patience: Early stopping patience per CV fold (default: 20)
             
         Returns:
             OptimizationResult
         """
+        self.logger.info(
+            f"NN optimization: opt_epochs={opt_epochs}, cv_epochs={cv_epochs}, "
+            f"opt_patience={opt_patience}, cv_patience={cv_patience}"
+        )
         try:
             import optuna
         except ImportError:
@@ -331,11 +343,21 @@ class HyperparameterOptimizer(LoggerMixin):
                 'batch_size': ([16, 32, 64, 128], None, 'categorical'),
                 'weight_decay': (1e-6, 1e-3, 'float_log'),
                 'optimizer': (['adam', 'adamw'], None, 'categorical'),
+                'gradient_clip_val': (0.0, 5.0, 'float'),
             }
         
         # Helper function to sample with ranges
         def _suggest_with_ranges(trial, param_name, ranges):
-            min_val, max_val, ptype = ranges[param_name]
+            # v1.2.1: For per-layer params like 'n_units_0', look up the base name
+            # 'n_units' in ranges. Optuna still uses the full unique name.
+            range_key = param_name
+            if param_name not in ranges:
+                # Try stripping _{number} suffix to find base parameter range
+                import re
+                m = re.match(r'^(.+)_\d+$', param_name)
+                if m and m.group(1) in ranges:
+                    range_key = m.group(1)
+            min_val, max_val, ptype = ranges[range_key]
             if ptype == 'int':
                 return trial.suggest_int(param_name, int(min_val), int(max_val))
             elif ptype == 'int_log':
@@ -351,30 +373,62 @@ class HyperparameterOptimizer(LoggerMixin):
         
         self._cv_scores_nn = []
         
+        # Shared state to track consecutive failures
+        _last_exception = [None]  # Use list for mutable reference in closure
+        
         def objective(trial):
+            # Validate data before starting — these are FATAL, propagate immediately
+            if X_train is None or y_train is None:
+                raise ValueError("Training data (X_train, y_train) is None. "
+                                 "Please load data and set target column first.")
+            if cv_folds <= 1 and (X_val is None or y_val is None):
+                raise ValueError(
+                    f"Validation data is None but cv_folds={cv_folds}. "
+                    f"Either set cv_folds > 1 in the NN tab, "
+                    f"or load external validation data in the Data tab."
+                )
+            if np.isnan(X_train).any() or np.isnan(y_train).any():
+                nan_cols = []
+                raise ValueError(
+                    f"Training data contains NaN values. "
+                    f"Please clean your dataset before optimizing."
+                )
+            if cv_folds <= 1 and (np.isnan(X_val).any() or np.isnan(y_val).any()):
+                raise ValueError("Validation data contains NaN values.")
+            
             # Sample architecture parameters
             n_layers = _suggest_with_ranges(trial, 'n_layers', param_ranges)
             
             hidden_layers = []
             for i in range(n_layers):
-                n_units = _suggest_with_ranges(trial, 'n_units', param_ranges)
-                dropout = _suggest_with_ranges(trial, 'dropout', param_ranges)
-                activation = _suggest_with_ranges(trial, 'activation', param_ranges)
-                use_bn = _suggest_with_ranges(trial, 'batch_norm', param_ranges)
+                # v1.2.1 FIX: Use per-layer parameter names so each layer can
+                # have different values. Without the _{i} suffix, Optuna treats
+                # all layers as the same parameter and they all get identical values.
+                n_units = _suggest_with_ranges(trial, f'n_units_{i}', param_ranges)
+                dropout = _suggest_with_ranges(trial, f'dropout_{i}', param_ranges)
+                activation = _suggest_with_ranges(trial, f'activation_{i}', param_ranges)
+                use_bn = _suggest_with_ranges(trial, f'batch_norm_{i}', param_ranges)
+                # Categorical boolean may come as string from Optuna
+                if isinstance(use_bn, str):
+                    use_bn = use_bn.lower() == 'true'
                 
                 hidden_layers.append({
                     'n_units': n_units,
                     'activation': activation,
                     'dropout_rate': dropout,
-                    'use_batch_norm': use_bn,
+                    'use_batch_norm': bool(use_bn),
                     'use_layer_norm': False
                 })
             
             # Training parameters
             learning_rate = _suggest_with_ranges(trial, 'learning_rate', param_ranges)
             batch_size = _suggest_with_ranges(trial, 'batch_size', param_ranges)
+            # Categorical values may come as strings - convert to proper types
+            if isinstance(batch_size, str):
+                batch_size = int(batch_size)
             weight_decay = _suggest_with_ranges(trial, 'weight_decay', param_ranges)
             optimizer_name = _suggest_with_ranges(trial, 'optimizer', param_ranges)
+            gradient_clip_val = _suggest_with_ranges(trial, 'gradient_clip_val', param_ranges)
             
             # Build and train model
             from ..core.nn_builder import NeuralNetworkBuilder
@@ -389,12 +443,13 @@ class HyperparameterOptimizer(LoggerMixin):
                 )
                 builder.build_model()
                 builder.create_training_config(
-                    epochs=200,
+                    epochs=opt_epochs,
                     batch_size=batch_size,
                     learning_rate=learning_rate,
                     optimizer=optimizer_name,
                     weight_decay=weight_decay,
-                    early_stopping_patience=30
+                    early_stopping_patience=opt_patience,
+                    gradient_clip_val=gradient_clip_val
                 )
                 
                 if cv_folds > 1 and len(X_train) >= cv_folds * 2:
@@ -418,12 +473,13 @@ class HyperparameterOptimizer(LoggerMixin):
                         )
                         fold_builder.build_model()
                         fold_builder.create_training_config(
-                            epochs=100,
+                            epochs=cv_epochs,
                             batch_size=batch_size,
                             learning_rate=learning_rate,
                             optimizer=optimizer_name,
                             weight_decay=weight_decay,
-                            early_stopping_patience=20
+                            early_stopping_patience=cv_patience,
+                            gradient_clip_val=gradient_clip_val
                         )
                         
                         fold_builder.fit(X_fold_train, y_fold_train, X_fold_val, y_fold_val, verbose=False)
@@ -460,7 +516,10 @@ class HyperparameterOptimizer(LoggerMixin):
                 return score
             
             except Exception as e:
+                import traceback
+                _last_exception[0] = (e, traceback.format_exc())
                 self.logger.error(f"Trial {trial.number} failed: {e}")
+                self.logger.error(traceback.format_exc())
                 return float('-inf')
         
         start_time = time.time()
@@ -476,6 +535,26 @@ class HyperparameterOptimizer(LoggerMixin):
             study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         
         optimization_time = time.time() - start_time
+        
+        # Check if ALL trials failed
+        if study.best_value == float('-inf') or study.best_value is None:
+            last_err, last_tb = _last_exception[0] if _last_exception[0] else (None, None)
+            if last_err:
+                raise RuntimeError(
+                    f"NN optimization failed: all {n_trials} trials returned -inf.\n\n"
+                    f"Last error: {last_err}\n\n"
+                    f"Common causes:\n"
+                    f"1. NaN values in training/validation data\n"
+                    f"2. X_val/y_val is None (set CV folds > 1 or load validation data)\n"
+                    f"3. PyTorch model build error (check input/output dimensions)\n"
+                    f"4. All predictions are NaN (learning rate too high, bad architecture)\n\n"
+                    f"Check the application logs for the full traceback."
+                )
+            else:
+                raise RuntimeError(
+                    f"NN optimization failed: all {n_trials} trials returned -inf. "
+                    f"No exception was captured — check the logs."
+                )
         
         # Compile results
         best_params = study.best_params

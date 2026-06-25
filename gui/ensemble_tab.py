@@ -20,7 +20,7 @@ class EnsembleOptimizationThread(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
     
-    def __init__(self, ensemble_trainer, X, y, model_names, n_trials=50, cv_folds=5):
+    def __init__(self, ensemble_trainer, X, y, model_names, n_trials=50, cv_folds=5, random_state=42):
         super().__init__()
         self.ensemble_trainer = ensemble_trainer
         self.X = X
@@ -28,6 +28,7 @@ class EnsembleOptimizationThread(QThread):
         self.model_names = model_names
         self.n_trials = n_trials
         self.cv_folds = cv_folds
+        self.random_state = random_state
     
     def run(self):
         try:
@@ -39,6 +40,7 @@ class EnsembleOptimizationThread(QThread):
                 model_names=self.model_names,
                 n_trials=self.n_trials,
                 cv_folds=self.cv_folds,
+                random_state=self.random_state,
                 progress_callback=progress_callback
             )
             self.finished.emit(result)
@@ -53,7 +55,7 @@ class EnsembleTrainingThread(QThread):
     error = pyqtSignal(str)
     
     def __init__(self, ensemble_trainer, ensemble_type, model_names, X_train, y_train,
-                 X_test, y_test, cv_folds=5):
+                 X_test, y_test, cv_folds=5, random_state=42, weights=None):
         super().__init__()
         self.ensemble_trainer = ensemble_trainer
         self.ensemble_type = ensemble_type
@@ -63,6 +65,8 @@ class EnsembleTrainingThread(QThread):
         self.X_test = X_test
         self.y_test = y_test
         self.cv_folds = cv_folds
+        self.random_state = random_state
+        self.weights = weights
     
     def run(self):
         try:
@@ -75,7 +79,9 @@ class EnsembleTrainingThread(QThread):
                 self.X_train, self.y_train,
                 self.X_test, self.y_test,
                 cv_folds=self.cv_folds,
-                progress_callback=progress_callback
+                random_state=self.random_state,
+                progress_callback=progress_callback,
+                weights=self.weights
             )
             self.finished.emit(result)
         except Exception as e:
@@ -127,15 +133,70 @@ class EnsembleTab(QWidget):
         self.ensemble_type_combo.addItems([
             "weighted_average", "stacking"
         ])
+        self.ensemble_type_combo.setToolTip(
+            "weighted_average: combines predictions using weighted sum. "
+            "Faster, good when models are diverse. "
+            "stacking: trains a meta-learner on model outputs. "
+            "More complex but can capture interactions between models."
+        )
         config_layout.addWidget(self.ensemble_type_combo, 0, 1)
         
         config_layout.addWidget(QLabel("CV Folds (Training):"), 1, 0)
         self.cv_folds_spin = QSpinBox()
         self.cv_folds_spin.setRange(1, 10)
         self.cv_folds_spin.setValue(5)
+        self.cv_folds_spin.setToolTip(
+            "Cross-validation folds for training the ensemble. "
+            "Each base model is retrained on K different splits to generate "
+            "out-of-fold predictions for the ensemble."
+        )
         config_layout.addWidget(self.cv_folds_spin, 1, 1)
         
+        config_layout.addWidget(QLabel("Random Seed:"), 2, 0)
+        self.random_seed_spin = QSpinBox()
+        self.random_seed_spin.setRange(0, 9999)
+        self.random_seed_spin.setValue(42)
+        self.random_seed_spin.setToolTip("Random seed for reproducible ensemble training")
+        config_layout.addWidget(self.random_seed_spin, 2, 1)
+        
         left_layout.addWidget(config_group)
+        
+        # v1.3.0: Manual Weights Configuration
+        manual_group = QGroupBox("Manual Weights (Optional)")
+        manual_layout = QVBoxLayout(manual_group)
+        
+        manual_info = QLabel(
+            "Set custom weights for each model. If empty, equal weights are used."
+        )
+        manual_info.setWordWrap(True)
+        manual_layout.addWidget(manual_info)
+        
+        # Container for weight spinboxes (populated dynamically)
+        self.manual_weights_widget = QWidget()
+        self.manual_weights_layout = QGridLayout(self.manual_weights_widget)
+        self.manual_weights_layout.setColumnStretch(1, 1)
+        self.manual_weights_layout.addWidget(QLabel("<b>Model</b>"), 0, 0)
+        self.manual_weights_layout.addWidget(QLabel("<b>Weight</b>"), 0, 1)
+        manual_layout.addWidget(self.manual_weights_widget)
+        
+        self.refresh_weights_btn = QPushButton("Refresh from Selection")
+        self.refresh_weights_btn.setToolTip("Update weight fields based on currently selected models")
+        self.refresh_weights_btn.clicked.connect(self._refresh_manual_weights)
+        manual_layout.addWidget(self.refresh_weights_btn)
+        
+        self.train_manual_btn = QPushButton("Train with Manual Weights")
+        self.train_manual_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E65100;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+            }
+        """)
+        self.train_manual_btn.clicked.connect(self._train_with_manual_weights)
+        manual_layout.addWidget(self.train_manual_btn)
+        
+        left_layout.addWidget(manual_group)
         
         # Ensemble Optimization
         opt_group = QGroupBox("Weight Optimization (Bayesian)")
@@ -146,13 +207,27 @@ class EnsembleTab(QWidget):
         self.opt_trials_spin.setRange(10, 200)
         self.opt_trials_spin.setValue(50)
         self.opt_trials_spin.setSingleStep(10)
+        self.opt_trials_spin.setToolTip(
+            "Number of Bayesian optimization trials to find optimal weights. "
+            "More trials = better weights but longer optimization."
+        )
         opt_layout.addWidget(self.opt_trials_spin, 0, 1)
         
-        opt_layout.addWidget(QLabel("CV Folds (Optimization):"), 1, 0)
+        opt_layout.addWidget(QLabel("CV Folds (Opt):"), 1, 0)
         self.opt_cv_folds_spin = QSpinBox()
         self.opt_cv_folds_spin.setRange(1, 10)
         self.opt_cv_folds_spin.setValue(5)
+        self.opt_cv_folds_spin.setToolTip(
+            "CV folds for evaluating weight combinations during optimization."
+        )
         opt_layout.addWidget(self.opt_cv_folds_spin, 1, 1)
+        
+        opt_layout.addWidget(QLabel("Random Seed:"), 2, 0)
+        self.opt_random_seed_spin = QSpinBox()
+        self.opt_random_seed_spin.setRange(0, 9999)
+        self.opt_random_seed_spin.setValue(42)
+        self.opt_random_seed_spin.setToolTip("Random seed for reproducible weight optimization")
+        opt_layout.addWidget(self.opt_random_seed_spin, 2, 1)
         
         left_layout.addWidget(opt_group)
         
@@ -288,6 +363,116 @@ class EnsembleTab(QWidget):
             except Exception as e:
                 print(f"Error loading NN models: {e}")
     
+    def _refresh_manual_weights(self):
+        """Populate manual weight fields from currently selected models."""
+        # Clear existing weight widgets (keep header row 0)
+        while self.manual_weights_layout.count() > 2:
+            item = self.manual_weights_layout.takeAt(2)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        selected_models, _ = self._get_selected_models()
+        
+        if not selected_models:
+            no_models = QLabel("(No models selected. Select models above and click Refresh.)")
+            self.manual_weights_layout.addWidget(no_models, 1, 0, 1, 2)
+            return
+        
+        # Equal weights by default
+        default_weight = 1.0 / len(selected_models) if selected_models else 1.0
+        
+        for i, model_name in enumerate(selected_models):
+            row = i + 1
+            self.manual_weights_layout.addWidget(QLabel(f"{model_name}:"), row, 0)
+            
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 10.0)
+            spin.setValue(round(default_weight, 4))
+            spin.setDecimals(4)
+            spin.setSingleStep(0.05)
+            # Store model name as property for later retrieval
+            spin.setProperty('model_name', model_name)
+            self.manual_weights_layout.addWidget(spin, row, 1)
+    
+    def _get_manual_weights(self):
+        """Collect manually entered weights. Returns None if no weights set."""
+        weights = {}
+        has_any = False
+        
+        for i in range(self.manual_weights_layout.count()):
+            item = self.manual_weights_layout.itemAt(i)
+            widget = item.widget()
+            if isinstance(widget, QDoubleSpinBox):
+                model_name = widget.property('model_name')
+                if model_name:
+                    weights[model_name] = widget.value()
+                    if widget.value() != 0.0:
+                        has_any = True
+        
+        return weights if has_any else None
+    
+    def _train_with_manual_weights(self):
+        """Train ensemble with manually configured weights."""
+        if self.parent is None or not hasattr(self.parent, 'data_tab'):
+            QMessageBox.warning(self, "Warning", "No data available")
+            return
+        
+        data_manager = self.parent.data_tab.get_data_manager()
+        trainer = self.parent.training_tab.get_trainer()
+        
+        if data_manager is None or data_manager.data is None:
+            QMessageBox.warning(self, "Warning", "No data loaded!")
+            return
+        
+        selected_models, _ = self._get_selected_models()
+        if len(selected_models) < 2:
+            QMessageBox.warning(self, "Warning", "Please select at least 2 models!")
+            return
+        
+        weights = self._get_manual_weights()
+        
+        try:
+            use_val = data_manager.validation_data is not None
+            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+            
+            ensemble_type = self.ensemble_type_combo.currentText()
+            cv_folds = self.cv_folds_spin.value()
+            
+            self.ensemble_trainer = EnsembleTrainer(trainer)
+            
+            self.train_manual_btn.setEnabled(False)
+            self.train_btn.setEnabled(False)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self.progress_text.clear()
+            
+            if weights:
+                self.progress_text.append("Training ensemble with manual weights:")
+                for name, w in weights.items():
+                    self.progress_text.append(f"  {name}: {w:.4f}")
+            else:
+                self.progress_text.append("Training ensemble with equal weights (no manual weights set)")
+            
+            self.training_thread = EnsembleTrainingThread(
+                self.ensemble_trainer,
+                ensemble_type,
+                selected_models,
+                X_train, y_train,
+                X_test, y_test,
+                cv_folds=cv_folds,
+                random_state=self.random_seed_spin.value(),
+                weights=weights
+            )
+            self.training_thread.progress.connect(self._on_training_progress)
+            self.training_thread.finished.connect(self._on_training_finished)
+            self.training_thread.error.connect(self._on_training_error)
+            self.training_thread.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start manual ensemble training:\n{str(e)}")
+            self.train_manual_btn.setEnabled(True)
+            self.train_btn.setEnabled(True)
+    
     def _get_selected_models(self):
         """Get list of selected model names and their source info."""
         selected_names = []
@@ -341,7 +526,8 @@ class EnsembleTab(QWidget):
                 selected_models,
                 X_train, y_train,
                 X_test, y_test,
-                cv_folds=cv_folds
+                cv_folds=cv_folds,
+                random_state=self.random_seed_spin.value()
             )
             self.training_thread.progress.connect(self._on_training_progress)
             self.training_thread.finished.connect(self._on_training_finished)
@@ -392,7 +578,8 @@ class EnsembleTab(QWidget):
                 X_train, y_train,
                 model_names=selected_models,
                 n_trials=n_trials,
-                cv_folds=cv_folds
+                cv_folds=cv_folds,
+                random_state=self.opt_random_seed_spin.value()
             )
             self.opt_thread.progress.connect(self._on_optimization_progress)
             self.opt_thread.finished.connect(self._on_optimization_finished)
@@ -432,6 +619,7 @@ class EnsembleTab(QWidget):
     def _on_training_finished(self, result):
         """Handle training completion."""
         self.train_btn.setEnabled(True)
+        self.train_manual_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
         # Store the result in the main trainer's results dict so it appears in Results tab
@@ -468,6 +656,10 @@ class EnsembleTab(QWidget):
                 self.progress_text.append(f"Added '{ens_name}' to Results tab")
             except Exception as e:
                 self.progress_text.append(f"Warning: Could not add to Results tab: {e}")
+        
+        # v1.3.0: Ensemble results are already stored in ensemble_trainer.results
+        # by train_ensemble(). Do NOT duplicate in trainer.results to avoid
+        # triplicated entries in the Results tab.
         
         self._display_results(result)
         
@@ -517,37 +709,8 @@ class EnsembleTab(QWidget):
                 else "Optimized weights ready"
             )
         
-        # Also store the optimized ensemble in trainer.results for the Results tab
-        if self.parent and hasattr(self.parent, 'training_tab'):
-            try:
-                trainer = self.parent.training_tab.get_trainer()
-                ens_name = f"Ensemble_Optimized_{len(result.model_names)}models"
-                
-                from ..core.trainer import TrainingResult
-                
-                metrics = dict(result.metrics)
-                if 'rmse' not in metrics and 'r2' in metrics:
-                    metrics['rmse'] = 0.0
-                if 'mae' not in metrics and 'r2' in metrics:
-                    metrics['mae'] = 0.0
-                
-                training_result = TrainingResult(
-                    model=result,
-                    model_name=ens_name,
-                    problem_type=result.problem_type,
-                    metrics=metrics,
-                    cv_metrics={'test_score': result.cv_scores} if result.cv_scores else {},
-                    training_time=result.training_time,
-                    feature_importance=None,
-                    predictions=result.predictions,
-                    true_values=result.true_values,
-                    is_neural_network=False
-                )
-                trainer.results[ens_name] = training_result
-                self.progress_text.append(f"Added '{ens_name}' to Results tab")
-            except Exception as e:
-                self.progress_text.append(f"Warning: Could not add to Results tab: {e}")
-        
+        # v1.3.0: Results are already in ensemble_trainer.results via optimize_weights().
+        # Do NOT duplicate in trainer.results to avoid duplicates in Results tab.
         self._display_results(result)
         
         # Build summary message

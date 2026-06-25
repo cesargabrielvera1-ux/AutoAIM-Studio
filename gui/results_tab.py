@@ -180,11 +180,15 @@ class ResultsTab(QWidget):
             # The optimization details remain accessible in the Optimization tab.
             
             # Get neural network results (training only — not optimization)
+            # v1.2.1 FIX: Filter out duplicates already present in trainer.results.
+            # train_neural_network() registers in BOTH trainer.results AND
+            # nn_training_results, so the same model would appear twice.
+            trainer_names = {name for name, _, _ in all_results}
             if hasattr(self.parent, 'nn_tab'):
                 nn_tab = self.parent.nn_tab
                 if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                     for nn_name, nn_result in nn_tab.nn_training_results:
-                        if nn_result is not None:
+                        if nn_result is not None and nn_name not in trainer_names:
                             all_results.append((
                                 nn_name,
                                 nn_result,
@@ -334,12 +338,22 @@ class ResultsTab(QWidget):
             # Actions
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(5, 0, 5, 0)
+            actions_layout.setContentsMargins(2, 0, 2, 0)
+            actions_layout.setSpacing(2)
             
             details_btn = QPushButton("Details")
             details_btn.setProperty('model_name', name)
+            details_btn.setMaximumWidth(55)
+            details_btn.setStyleSheet("padding: 2px 4px; font-size: 8pt;")
             details_btn.clicked.connect(self._show_model_details)
             actions_layout.addWidget(details_btn)
+            
+            delete_btn = QPushButton("Delete")
+            delete_btn.setProperty('model_name', name)
+            delete_btn.setMaximumWidth(55)
+            delete_btn.setStyleSheet("padding: 2px 4px; font-size: 8pt; background-color: #d32f2f; color: white;")
+            delete_btn.clicked.connect(self._delete_model_result)
+            actions_layout.addWidget(delete_btn)
             
             self.comparison_table.setCellWidget(i, 8, actions_widget)
     
@@ -394,14 +408,76 @@ class ResultsTab(QWidget):
             # Actions
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(5, 0, 5, 0)
+            actions_layout.setContentsMargins(2, 0, 2, 0)
+            actions_layout.setSpacing(2)
             
             details_btn = QPushButton("Details")
             details_btn.setProperty('model_name', name)
+            details_btn.setMaximumWidth(55)
+            details_btn.setStyleSheet("padding: 2px 4px; font-size: 8pt;")
             details_btn.clicked.connect(self._show_model_details)
             actions_layout.addWidget(details_btn)
             
+            delete_btn = QPushButton("Delete")
+            delete_btn.setProperty('model_name', name)
+            delete_btn.setMaximumWidth(55)
+            delete_btn.setStyleSheet("padding: 2px 4px; font-size: 8pt; background-color: #d32f2f; color: white;")
+            delete_btn.clicked.connect(self._delete_model_result)
+            actions_layout.addWidget(delete_btn)
+            
             self.comparison_table.setCellWidget(i, 8, actions_widget)
+    
+    def _delete_model_result(self):
+        """Delete a model result from all storage locations."""
+        btn = self.sender()
+        model_name = btn.property('model_name')
+        
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete model '{model_name}' from results?\n\n"
+            f"This will remove it from the results table but will NOT "
+            f"delete any saved model files.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        deleted = False
+        original_count = 0
+        new_count = 0
+        
+        # 1. Try trainer.results (training + optimized models)
+        trainer = None
+        if self.parent and hasattr(self.parent, 'training_tab'):
+            trainer = self.parent.training_tab.get_trainer()
+        if trainer and model_name in trainer.results:
+            del trainer.results[model_name]
+            deleted = True
+        
+        # 2. Try NN training results
+        if self.parent and hasattr(self.parent, 'nn_tab'):
+            nn_tab = self.parent.nn_tab
+            if hasattr(nn_tab, 'nn_training_results'):
+                original_count = len(nn_tab.nn_training_results)
+                nn_tab.nn_training_results = [
+                    (n, r) for n, r in nn_tab.nn_training_results if n != model_name
+                ]
+                new_count = len(nn_tab.nn_training_results)
+                if new_count < original_count:
+                    deleted = True
+        
+        # 3. Try ensemble results
+        if self.parent and hasattr(self.parent, 'ensemble_tab'):
+            ens_tab = self.parent.ensemble_tab
+            if hasattr(ens_tab, 'ensemble_trainer') and ens_tab.ensemble_trainer:
+                if model_name in ens_tab.ensemble_trainer.results:
+                    del ens_tab.ensemble_trainer.results[model_name]
+                    deleted = True
+        
+        if deleted:
+            self._refresh_results()
+        else:
+            QMessageBox.warning(self, "Warning", f"Could not find '{model_name}' to delete.")
     
     def _show_model_details(self):
         """Show model details for trained, optimized, and neural network models."""
@@ -516,6 +592,23 @@ class ResultsTab(QWidget):
             for feat, imp in sorted_imp:
                 details += f"<li>{feat}: {imp:.4f}</li>"
             details += "</ul>"
+        
+        # v1.3.0: Cross-Validation Scores per fold (same format as Training Tab)
+        cv_scores = None
+        if hasattr(result, 'cv_metrics') and result.cv_metrics:
+            cv_scores = result.cv_metrics.get('test_score', [])
+        elif hasattr(result, 'cv_scores') and result.cv_scores:
+            cv_scores = result.cv_scores
+        
+        if cv_scores and len(cv_scores) > 0:
+            details += "<h4>Cross-Validation Scores (per fold):</h4><table border='1' cellpadding='5'>"
+            details += "<tr><th>Fold</th><th>Score</th></tr>"
+            for fold_idx, score in enumerate(cv_scores, 1):
+                details += f"<tr><td>Fold {fold_idx}</td><td>{score:.6f}</td></tr>"
+            mean_score = np.mean(cv_scores)
+            std_score = np.std(cv_scores)
+            details += f"<tr><td><b>Mean ± Std</b></td><td><b>{mean_score:.6f} ± {std_score:.6f}</b></td></tr>"
+            details += "</table>"
         
         # Neural network specific details
         if hasattr(result, 'is_neural_network') and result.is_neural_network:

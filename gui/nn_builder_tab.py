@@ -48,11 +48,14 @@ class NNTrainingThread(QThread):
 class NNOptimizationThread(QThread):
     """Thread for optimizing neural network hyperparameters."""
     progress = pyqtSignal(int, float, dict)
+    status = pyqtSignal(str)  # v1.3.0: Status messages for long operations
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
     
     def __init__(self, optimizer, nn_builder, X_train, y_train, X_val, y_val,
-                 input_dim, output_dim, param_ranges, n_trials, cv_folds=1):
+                 input_dim, output_dim, param_ranges, n_trials, cv_folds=1,
+                 opt_epochs=200, cv_epochs=100, opt_patience=30, cv_patience=20,
+                 random_state=42):
         super().__init__()
         self.optimizer = optimizer
         self.nn_builder = nn_builder
@@ -65,9 +68,16 @@ class NNOptimizationThread(QThread):
         self.param_ranges = param_ranges
         self.n_trials = n_trials
         self.cv_folds = cv_folds
+        self.opt_epochs = opt_epochs
+        self.cv_epochs = cv_epochs
+        self.opt_patience = opt_patience
+        self.cv_patience = cv_patience
+        self.random_state = random_state
     
     def run(self):
         try:
+            self.status.emit("Starting NN optimization...")
+            
             def progress_callback(trial_num, score, params):
                 self.progress.emit(trial_num, score, params)
             
@@ -82,8 +92,14 @@ class NNOptimizationThread(QThread):
                 param_ranges=self.param_ranges,
                 n_trials=self.n_trials,
                 cv_folds=self.cv_folds,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                opt_epochs=self.opt_epochs,
+                cv_epochs=self.cv_epochs,
+                opt_patience=self.opt_patience,
+                cv_patience=self.cv_patience,
+                random_state=self.random_state
             )
+            self.status.emit("Compiling optimization results...")
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
@@ -236,6 +252,7 @@ class NNBuilderTab(QWidget):
         self.nn_custom_param_ranges = {}
         self.nn_cv_folds = 5
         self.last_nn_opt_result = None  # Store last optimization result
+        self._best_params_applied = False  # v1.3.0: True after Apply Best + before Train
         
         self._init_ui()
     
@@ -260,11 +277,22 @@ class NNBuilderTab(QWidget):
         self.units_spin = QSpinBox()
         self.units_spin.setRange(1, 2048)
         self.units_spin.setValue(128)
+        self.units_spin.setToolTip(
+            "Number of neurons in this layer. More neurons = higher capacity to learn "
+            "complex patterns, but may overfit. Typical: 64-512 per hidden layer."
+        )
         layer_controls.addWidget(self.units_spin)
         
         layer_controls.addWidget(QLabel("Activation:"))
         self.activation_combo = QComboBox()
         self.activation_combo.addItems(['relu', 'leaky_relu', 'tanh', 'gelu', 'sigmoid', 'elu'])
+        self.activation_combo.setToolTip(
+            "Non-linear function applied to each neuron's output. "
+            "relu: fast default, good for most problems. "
+            "tanh: zero-centered, good for balanced data. "
+            "gelu: smooth, state-of-the-art for deep networks. "
+            "sigmoid: only for output layer (binary classification)."
+        )
         layer_controls.addWidget(self.activation_combo)
         
         layer_controls.addWidget(QLabel("Dropout:"))
@@ -272,6 +300,11 @@ class NNBuilderTab(QWidget):
         self.dropout_spin.setRange(0.0, 1.0)
         self.dropout_spin.setValue(0.2)
         self.dropout_spin.setSingleStep(0.05)
+        self.dropout_spin.setToolTip(
+            "Fraction of neurons randomly disabled during training. "
+            "Prevents overfitting by forcing the network to not rely on single neurons. "
+            "Typical: 0.2-0.5. 0 = no dropout."
+        )
         layer_controls.addWidget(self.dropout_spin)
         
         arch_layout.addLayout(layer_controls)
@@ -280,9 +313,18 @@ class NNBuilderTab(QWidget):
         norm_layout = QHBoxLayout()
         self.batch_norm_check = QCheckBox("Batch Normalization")
         self.batch_norm_check.setChecked(True)
+        self.batch_norm_check.setToolTip(
+            "Normalizes layer inputs across the batch. Speeds up training, "
+            "allows higher learning rates, and reduces sensitivity to initialization. "
+            "Recommended for most networks."
+        )
         norm_layout.addWidget(self.batch_norm_check)
         
         self.layer_norm_check = QCheckBox("Layer Normalization")
+        self.layer_norm_check.setToolTip(
+            "Normalizes across features within each sample. Better than batch norm "
+            "for small batches and recurrent networks. Use alone or combined with batch norm."
+        )
         norm_layout.addWidget(self.layer_norm_check)
         
         arch_layout.addLayout(norm_layout)
@@ -303,111 +345,252 @@ class NNBuilderTab(QWidget):
         
         left_layout.addWidget(arch_group)
         
-        # Training Configuration
+        # Training Configuration (compact 4x2 grid)
         train_group = QGroupBox("Training Configuration")
         train_layout = QGridLayout(train_group)
         
+        # Row 0: Epochs + Batch Size
         train_layout.addWidget(QLabel("Epochs:"), 0, 0)
         self.epochs_spin = QSpinBox()
         self.epochs_spin.setRange(10, 10000)
         self.epochs_spin.setValue(500)
         self.epochs_spin.setSingleStep(50)
+        self.epochs_spin.setToolTip(
+            "Maximum training epochs (full passes through the training data). "
+            "Early stopping will likely halt before this limit. "
+            "Typical: 200-1000 depending on dataset size."
+        )
         train_layout.addWidget(self.epochs_spin, 0, 1)
         
-        train_layout.addWidget(QLabel("Batch Size:"), 1, 0)
+        train_layout.addWidget(QLabel("Batch Size:"), 0, 2)
         self.batch_size_combo = QComboBox()
         self.batch_size_combo.addItems(['8', '16', '32', '64', '128', '256'])
         self.batch_size_combo.setCurrentText('32')
-        train_layout.addWidget(self.batch_size_combo, 1, 1)
+        self.batch_size_combo.setToolTip(
+            "Number of samples processed together before updating weights. "
+            "Larger = faster training but more memory. Smaller = noisier gradients but may generalize better. "
+            "Typical: 16-128. Reduce if you get out-of-memory errors."
+        )
+        train_layout.addWidget(self.batch_size_combo, 0, 3)
         
-        train_layout.addWidget(QLabel("Learning Rate:"), 2, 0)
+        # Row 1: Learning Rate + Optimizer
+        train_layout.addWidget(QLabel("Learning Rate:"), 1, 0)
         self.lr_spin = QDoubleSpinBox()
         self.lr_spin.setRange(0.0001, 1.0)
         self.lr_spin.setValue(0.001)
         self.lr_spin.setDecimals(6)
         self.lr_spin.setSingleStep(0.001)
-        train_layout.addWidget(self.lr_spin, 2, 1)
+        self.lr_spin.setToolTip(
+            "Step size for weight updates. Too high = unstable training. "
+            "Too low = very slow convergence. Typical: 0.0001 - 0.01. "
+            "With scheduler, start moderate (0.001) and let it decay."
+        )
+        train_layout.addWidget(self.lr_spin, 1, 1)
         
-        train_layout.addWidget(QLabel("Optimizer:"), 3, 0)
+        train_layout.addWidget(QLabel("Optimizer:"), 1, 2)
         self.optimizer_combo = QComboBox()
-        self.optimizer_combo.addItems(['adam', 'adamw', 'sgd', 'rmsprop'])
-        train_layout.addWidget(self.optimizer_combo, 3, 1)
+        self.optimizer_combo.addItems(['adam', 'adamw', 'rmsprop'])
+        self.optimizer_combo.setToolTip(
+            "Algorithm for updating neural network weights. "
+            "adam: adaptive, works well for most problems (recommended). "
+            "adamw: Adam with proper weight decay (often better generalization). "
+            "rmsprop: good for recurrent networks and non-stationary objectives."
+        )
+        train_layout.addWidget(self.optimizer_combo, 1, 3)
         
-        train_layout.addWidget(QLabel("Weight Decay:"), 4, 0)
+        # Row 2: Weight Decay + Patience
+        train_layout.addWidget(QLabel("Weight Decay:"), 2, 0)
         self.weight_decay_spin = QDoubleSpinBox()
         self.weight_decay_spin.setRange(0.0, 0.1)
         self.weight_decay_spin.setValue(0.0001)
         self.weight_decay_spin.setDecimals(6)
-        train_layout.addWidget(self.weight_decay_spin, 4, 1)
+        self.weight_decay_spin.setToolTip(
+            "L2 regularization for network weights. Penalizes large weights, "
+            "encouraging the model to use all inputs moderately. Prevents overfitting."
+        )
+        train_layout.addWidget(self.weight_decay_spin, 2, 1)
         
-        train_layout.addWidget(QLabel("Early Stopping Patience:"), 5, 0)
+        train_layout.addWidget(QLabel("Patience:"), 2, 2)
         self.patience_spin = QSpinBox()
         self.patience_spin.setRange(5, 500)
         self.patience_spin.setValue(50)
-        train_layout.addWidget(self.patience_spin, 5, 1)
+        self.patience_spin.setToolTip(
+            "Epochs to wait before stopping if validation loss doesn't improve. "
+            "Higher = more chance to escape local minima. Lower = faster stopping. "
+            "Typical: 20-100."
+        )
+        train_layout.addWidget(self.patience_spin, 2, 3)
         
-        train_layout.addWidget(QLabel("CV Folds:"), 6, 0)
+        # Row 3: CV Folds + Random Seed
+        train_layout.addWidget(QLabel("CV Folds:"), 3, 0)
         self.cv_folds_spin = QSpinBox()
         self.cv_folds_spin.setRange(1, 10)
         self.cv_folds_spin.setValue(5)
-        train_layout.addWidget(self.cv_folds_spin, 6, 1)
+        self.cv_folds_spin.setToolTip(
+            "K-fold cross-validation. Network trained K times on different splits. "
+            "Higher = more reliable performance estimate but Kx slower."
+        )
+        train_layout.addWidget(self.cv_folds_spin, 3, 1)
+        
+        train_layout.addWidget(QLabel("Random Seed:"), 3, 2)
+        self.random_seed_spin = QSpinBox()
+        self.random_seed_spin.setRange(0, 9999)
+        self.random_seed_spin.setValue(42)
+        self.random_seed_spin.setToolTip(
+            "Random seed for reproducible NN training. "
+            "Same seed = same weight initialization and data shuffling."
+        )
+        train_layout.addWidget(self.random_seed_spin, 3, 3)
+        
+        # v1.3.0: Row 4: LR Scheduler + Early Stopping Min Delta
+        train_layout.addWidget(QLabel("Scheduler:"), 4, 0)
+        self.scheduler_combo = QComboBox()
+        self.scheduler_combo.addItems([
+            'reduce_on_plateau', 'cosine_annealing', 'step_lr', 'exponential', 'none'
+        ])
+        self.scheduler_combo.setCurrentText('reduce_on_plateau')
+        self.scheduler_combo.setToolTip(
+            "Learning rate scheduler. cosine_annealing: smooth decay; "
+            "reduce_on_plateau: drop when metrics stagnate; "
+            "step_lr: periodic drops; exponential: continuous decay; none: fixed LR"
+        )
+        train_layout.addWidget(self.scheduler_combo, 4, 1)
+        
+        train_layout.addWidget(QLabel("Min Delta:"), 4, 2)
+        self.min_delta_spin = QDoubleSpinBox()
+        self.min_delta_spin.setRange(1e-6, 0.1)
+        self.min_delta_spin.setValue(1e-4)
+        self.min_delta_spin.setDecimals(6)
+        self.min_delta_spin.setSingleStep(1e-4)
+        self.min_delta_spin.setToolTip(
+            "Minimum change in validation loss to qualify as improvement. "
+            "Smaller = more sensitive (stops later); Larger = less sensitive (stops earlier)"
+        )
+        train_layout.addWidget(self.min_delta_spin, 4, 3)
+        
+        # v1.3.0: Row 5: Gradient Clipping
+        train_layout.addWidget(QLabel("Grad Clip:"), 5, 0)
+        self.grad_clip_spin = QDoubleSpinBox()
+        self.grad_clip_spin.setRange(0.0, 10.0)
+        self.grad_clip_spin.setValue(1.0)
+        self.grad_clip_spin.setDecimals(2)
+        self.grad_clip_spin.setSingleStep(0.1)
+        self.grad_clip_spin.setToolTip(
+            "Maximum gradient norm for clipping. 0 = disabled. "
+            "Prevents exploding gradients in deep networks."
+        )
+        train_layout.addWidget(self.grad_clip_spin, 5, 1)
         
         left_layout.addWidget(train_group)
         
-        # Hyperparameter Optimization
+        # Hyperparameter Optimization (compact layout)
         opt_group = QGroupBox("Hyperparameter Optimization")
         opt_layout = QGridLayout(opt_group)
         
-        opt_layout.addWidget(QLabel("Optimization Trials:"), 0, 0)
+        # Row 0: Trials + CV Folds side by side
+        opt_layout.addWidget(QLabel("Trials:"), 0, 0)
         self.opt_trials_spin = QSpinBox()
         self.opt_trials_spin.setRange(10, 200)
         self.opt_trials_spin.setValue(50)
         self.opt_trials_spin.setSingleStep(10)
+        self.opt_trials_spin.setToolTip(
+            "Number of Bayesian optimization trials. Each trial tests a different "
+            "architecture + hyperparameter combination. More = better results but MUCH longer."
+        )
         opt_layout.addWidget(self.opt_trials_spin, 0, 1)
         
-        opt_layout.addWidget(QLabel("CV Folds (Optimization):"), 1, 0)
+        opt_layout.addWidget(QLabel("CV Folds:"), 0, 2)
         self.opt_cv_folds_spin = QSpinBox()
         self.opt_cv_folds_spin.setRange(1, 10)
         self.opt_cv_folds_spin.setValue(5)
-        opt_layout.addWidget(self.opt_cv_folds_spin, 1, 1)
+        self.opt_cv_folds_spin.setToolTip(
+            "K-fold CV for evaluating each trial. Higher = more reliable scores "
+            "but each trial takes Kx longer. Use fewer folds for large datasets."
+        )
+        opt_layout.addWidget(self.opt_cv_folds_spin, 0, 3)
         
-        self.edit_nn_ranges_btn = QPushButton("Edit Optimization Ranges")
+        # Row 1-2: Advanced settings in 2x2 grid (compact labels)
+        opt_layout.addWidget(QLabel("Opt.Ep:"), 1, 0)
+        self.opt_epochs_spin = QSpinBox()
+        self.opt_epochs_spin.setRange(10, 2000)
+        self.opt_epochs_spin.setValue(200)
+        self.opt_epochs_spin.setSingleStep(10)
+        self.opt_epochs_spin.setToolTip("Epochs per trial (simple validation)")
+        opt_layout.addWidget(self.opt_epochs_spin, 1, 1)
+        
+        opt_layout.addWidget(QLabel("CV Ep:"), 1, 2)
+        self.cv_epochs_spin = QSpinBox()
+        self.cv_epochs_spin.setRange(10, 1000)
+        self.cv_epochs_spin.setValue(100)
+        self.cv_epochs_spin.setSingleStep(10)
+        self.cv_epochs_spin.setToolTip("Epochs per fold (K-fold CV)")
+        opt_layout.addWidget(self.cv_epochs_spin, 1, 3)
+        
+        opt_layout.addWidget(QLabel("Opt.Pat:"), 2, 0)
+        self.opt_patience_spin = QSpinBox()
+        self.opt_patience_spin.setRange(5, 200)
+        self.opt_patience_spin.setValue(30)
+        self.opt_patience_spin.setToolTip("Early stopping patience (validation)")
+        opt_layout.addWidget(self.opt_patience_spin, 2, 1)
+        
+        opt_layout.addWidget(QLabel("CV Pat:"), 2, 2)
+        self.cv_patience_spin = QSpinBox()
+        self.cv_patience_spin.setRange(5, 100)
+        self.cv_patience_spin.setValue(20)
+        self.cv_patience_spin.setToolTip("Early stopping patience (CV fold)")
+        opt_layout.addWidget(self.cv_patience_spin, 2, 3)
+        
+        # Row 3: Random Seed for optimization
+        opt_layout.addWidget(QLabel("Random Seed:"), 3, 0)
+        self.opt_random_seed_spin = QSpinBox()
+        self.opt_random_seed_spin.setRange(0, 9999)
+        self.opt_random_seed_spin.setValue(42)
+        self.opt_random_seed_spin.setToolTip("Random seed for reproducible NN optimization")
+        opt_layout.addWidget(self.opt_random_seed_spin, 3, 1, 1, 3)
+        
+        # Row 4: Edit + Reset buttons side by side
+        self.edit_nn_ranges_btn = QPushButton("Edit Ranges")
         self.edit_nn_ranges_btn.clicked.connect(self._edit_nn_parameter_ranges)
-        opt_layout.addWidget(self.edit_nn_ranges_btn, 2, 0, 1, 2)
+        opt_layout.addWidget(self.edit_nn_ranges_btn, 4, 0, 1, 2)
         
-        self.reset_nn_ranges_btn = QPushButton("Reset Ranges to Default")
+        self.reset_nn_ranges_btn = QPushButton("Reset")
         self.reset_nn_ranges_btn.clicked.connect(self._reset_nn_parameter_ranges)
         self.reset_nn_ranges_btn.setEnabled(False)
-        opt_layout.addWidget(self.reset_nn_ranges_btn, 3, 0, 1, 2)
+        opt_layout.addWidget(self.reset_nn_ranges_btn, 4, 2, 1, 2)
         
+        # Row 5: Status label
         self.nn_ranges_label = QLabel("Using default ranges")
-        opt_layout.addWidget(self.nn_ranges_label, 4, 0, 1, 2)
+        opt_layout.addWidget(self.nn_ranges_label, 5, 0, 1, 4)
         
         left_layout.addWidget(opt_group)
         
-        # Optimize button
-        self.optimize_btn = QPushButton("Auto-Optimize Hyperparameters")
+        # v1.3.0: Action buttons in a compact horizontal grid (3 columns)
+        actions_group = QGroupBox("Actions")
+        actions_layout = QGridLayout(actions_group)
+        actions_layout.setSpacing(4)
+        
+        self.optimize_btn = QPushButton("Auto-Optimize")
         self.optimize_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1565C0;
                 color: white;
                 font-weight: bold;
-                padding: 10px;
-                font-size: 11pt;
+                padding: 8px;
+                font-size: 9pt;
             }
         """)
+        self.optimize_btn.setToolTip("Bayesian optimization of NN hyperparameters")
         self.optimize_btn.clicked.connect(self._optimize_hyperparameters)
-        left_layout.addWidget(self.optimize_btn)
+        actions_layout.addWidget(self.optimize_btn, 0, 0)
         
-        # Apply Best Parameters button
-        self.apply_best_params_btn = QPushButton("Apply Best Parameters to Architecture")
+        self.apply_best_params_btn = QPushButton("Apply Best")
         self.apply_best_params_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4A148C;
                 color: white;
                 font-weight: bold;
-                padding: 10px;
-                font-size: 11pt;
+                padding: 8px;
+                font-size: 9pt;
             }
             QPushButton:disabled {
                 background-color: #9E9E9E;
@@ -417,21 +600,23 @@ class NNBuilderTab(QWidget):
         self.apply_best_params_btn.clicked.connect(self._apply_best_nn_parameters)
         self.apply_best_params_btn.setEnabled(False)
         self.apply_best_params_btn.setToolTip("Run Auto-Optimize first to enable this button")
-        left_layout.addWidget(self.apply_best_params_btn)
+        actions_layout.addWidget(self.apply_best_params_btn, 0, 1)
         
-        # Train button
-        self.train_btn = QPushButton("Train Neural Network")
+        self.train_btn = QPushButton("Train NN")
         self.train_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2E7D32;
                 color: white;
                 font-weight: bold;
-                padding: 10px;
-                font-size: 12pt;
+                padding: 8px;
+                font-size: 10pt;
             }
         """)
+        self.train_btn.setToolTip("Train neural network with current configuration")
         self.train_btn.clicked.connect(self._train_network)
-        left_layout.addWidget(self.train_btn)
+        actions_layout.addWidget(self.train_btn, 0, 2)
+        
+        left_layout.addWidget(actions_group)
         
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -469,7 +654,7 @@ class NNBuilderTab(QWidget):
         
         self.progress_text = QTextEdit()
         self.progress_text.setReadOnly(True)
-        self.progress_text.setMaximumHeight(150)
+        self.progress_text.setMaximumHeight(100)
         progress_layout.addWidget(self.progress_text)
         
         right_layout.addWidget(progress_group)
@@ -654,12 +839,25 @@ class NNBuilderTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_text.clear()
         
+        # Read advanced optimization settings from UI (v1.2.1)
+        opt_epochs = self.opt_epochs_spin.value()
+        cv_epochs = self.cv_epochs_spin.value()
+        opt_patience = self.opt_patience_spin.value()
+        cv_patience = self.cv_patience_spin.value()
+        random_state = self.opt_random_seed_spin.value()
+        
         self.optimization_thread = NNOptimizationThread(
             self.nn_optimizer, self.nn_builder,
             X_train, y_train, X_test, y_test,
-            input_dim, output_dim, param_ranges, n_trials, cv_folds
+            input_dim, output_dim, param_ranges, n_trials, cv_folds,
+            opt_epochs=opt_epochs,
+            cv_epochs=cv_epochs,
+            opt_patience=opt_patience,
+            cv_patience=cv_patience,
+            random_state=random_state
         )
         self.optimization_thread.progress.connect(self._on_optimization_progress)
+        self.optimization_thread.status.connect(self._on_optimization_status)
         self.optimization_thread.finished.connect(self._on_optimization_finished)
         self.optimization_thread.error.connect(self._on_optimization_error)
         self.optimization_thread.start()
@@ -669,9 +867,22 @@ class NNBuilderTab(QWidget):
         self.progress_bar.setValue(int(100 * trial_num / self.opt_trials_spin.value()))
         self.progress_text.append(f"Trial {trial_num}: Score={score:.4f}")
     
+    def _on_optimization_status(self, msg: str):
+        """v1.3.0: Handle status messages from optimization thread.
+        
+        Provides visual feedback during long operations (e.g., CV fold training)
+        so the user doesn't think the application has frozen.
+        """
+        self.progress_text.append(msg)
+        # Keep progress bar visible and in indeterminate mode during status updates
+        if "Compiling" in msg or "Starting" in msg:
+            self.progress_bar.setRange(0, 0)  # Indeterminate (animated)
+    
     def _on_optimization_finished(self, result):
         """Handle optimization completion."""
         self.optimize_btn.setEnabled(True)
+        # v1.3.0: Reset progress bar to determinate mode before hiding
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setVisible(False)
         
         if result is None:
@@ -687,6 +898,12 @@ class NNBuilderTab(QWidget):
         from datetime import datetime
         timestamp = datetime.now().strftime("%H%M%S")
         opt_name = f"NN_Optimized_{timestamp}"
+        # v1.2.1 FIX: Replace any previous optimization result instead of
+        # appending, to prevent accumulation of stale optimization entries.
+        self.nn_optimizer_results = [
+            (n, r) for n, r in self.nn_optimizer_results 
+            if not n.startswith("NN_Optimized_")
+        ]
         self.nn_optimizer_results.append((opt_name, result))
 
         details = f"Optimization Complete!\n"
@@ -731,11 +948,12 @@ class NNBuilderTab(QWidget):
             n_layers = params.get('n_layers', 2)
 
             for i in range(n_layers):
-                # Extract per-layer parameters (Optuna names them like n_units_l0, dropout_l1, etc.)
-                n_units_key = f'n_units_l{i}' if f'n_units_l{i}' in params else 'n_units'
-                dropout_key = f'dropout_l{i}' if f'dropout_l{i}' in params else 'dropout'
-                activation_key = f'activation_l{i}' if f'activation_l{i}' in params else 'activation'
-                bn_key = f'batch_norm_l{i}' if f'batch_norm_l{i}' in params else 'batch_norm'
+                # v1.2.1 FIX: Per-layer parameter names use _{i} suffix so each
+                # layer can have different values. Format: n_units_0, dropout_0, etc.
+                n_units_key = f'n_units_{i}' if f'n_units_{i}' in params else 'n_units'
+                dropout_key = f'dropout_{i}' if f'dropout_{i}' in params else 'dropout'
+                activation_key = f'activation_{i}' if f'activation_{i}' in params else 'activation'
+                bn_key = f'batch_norm_{i}' if f'batch_norm_{i}' in params else 'batch_norm'
 
                 n_units = params.get(n_units_key, params.get('n_units', 128))
                 dropout = params.get(dropout_key, params.get('dropout', 0.2))
@@ -771,6 +989,7 @@ class NNBuilderTab(QWidget):
                     self.optimizer_combo.setCurrentIndex(opt_idx)
 
             self._update_architecture_preview()
+            self._best_params_applied = True  # v1.3.0: Mark that best params were applied
 
             QMessageBox.information(
                 self, "Applied",
@@ -816,8 +1035,11 @@ class NNBuilderTab(QWidget):
             batch_size=batch_size,
             learning_rate=self.lr_spin.value(),
             optimizer=self.optimizer_combo.currentText(),
+            scheduler=self.scheduler_combo.currentText(),
             weight_decay=self.weight_decay_spin.value(),
-            early_stopping_patience=self.patience_spin.value()
+            early_stopping_patience=self.patience_spin.value(),
+            early_stopping_min_delta=self.min_delta_spin.value(),
+            gradient_clip_val=self.grad_clip_spin.value() if self.grad_clip_spin.value() > 0 else 0.0
         )
         
         # Store CV folds for use in trainer
@@ -866,11 +1088,19 @@ class NNBuilderTab(QWidget):
         use_val = data_manager.validation_data is not None
         X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
         
-        # Train through ModelTrainer to get proper CV and results
+        # Determine base name: normal or optimized
+        if self._best_params_applied:
+            base_name = "NN_Optimized"
+            self._best_params_applied = False
+        else:
+            base_name = "Neural Network"
+        
+        # Train through ModelTrainer to get proper CV and results.
+        # The trainer automatically makes the name unique (_1, _2, etc.).
         try:
             result = trainer.train_neural_network(
                 self.nn_builder,
-                "Neural Network",
+                base_name,
                 X_train, y_train,
                 X_test, y_test,
                 'classification' if data_manager._is_classification else 'regression',
@@ -880,7 +1110,8 @@ class NNBuilderTab(QWidget):
             # Display results
             self._display_results(result)
 
-            # Store training result for results_tab access
+            # Store training result for results_tab access.
+            # result.model_name already contains the unique name assigned by trainer.
             self.nn_training_results.append((result.model_name, result))
             
             QMessageBox.information(self, "Success", "Training complete!")

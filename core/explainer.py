@@ -104,10 +104,16 @@ class ModelExplainer(LoggerMixin):
         
         # Create explainer based on model type
         try:
-            # Tree-based models
+            # Tree-based models (CatBoost sometimes fails with TreeExplainer, so we try/except)
             if hasattr(model, 'feature_importances_') or 'XGB' in model.__class__.__name__ or 'LGBM' in model.__class__.__name__:
-                self._explainer = shap.TreeExplainer(model)
-                self._shap_values = self._explainer.shap_values(X_sample)
+                try:
+                    self._explainer = shap.TreeExplainer(model)
+                    self._shap_values = self._explainer.shap_values(X_sample)
+                except Exception as e:
+                    self.logger.warning(f"TreeExplainer failed ({e}), falling back to KernelExplainer")
+                    bg_data = background_data if background_data is not None else X_sample[:min(10, len(X_sample))]
+                    self._explainer = shap.KernelExplainer(model.predict, bg_data)
+                    self._shap_values = self._explainer.shap_values(X_sample, nsamples=100)
             # Linear models
             elif hasattr(model, 'coef_'):
                 self._explainer = shap.LinearExplainer(model, background_data if background_data is not None else X_sample)
@@ -152,7 +158,8 @@ class ModelExplainer(LoggerMixin):
         y: np.ndarray,
         feature_names: Optional[List[str]] = None,
         n_repeats: int = 10,
-        n_jobs: int = 1
+        n_jobs: int = 1,
+        random_state: int = 42
     ) -> Dict[str, Any]:
         """Compute permutation feature importance."""
         n_features = X.shape[1]
@@ -168,7 +175,7 @@ class ModelExplainer(LoggerMixin):
             result = permutation_importance(
                 model, X, y,
                 n_repeats=n_repeats,
-                random_state=42,
+                random_state=random_state,
                 scoring=scoring,
                 n_jobs=n_jobs
             )
@@ -258,7 +265,8 @@ class ModelExplainer(LoggerMixin):
         model: Any,
         X: np.ndarray,
         y: np.ndarray,
-        feature_names: Optional[List[str]] = None
+        feature_names: Optional[List[str]] = None,
+        random_state: int = 42
     ) -> pd.DataFrame:
         """Get comprehensive feature importance summary."""
         n_features = X.shape[1]
@@ -287,7 +295,7 @@ class ModelExplainer(LoggerMixin):
         
         # Permutation importance (funciona para todos los modelos con .predict())
         try:
-            perm_result = permutation_importance(model, X, y, n_repeats=5, random_state=42, n_jobs=1)
+            perm_result = permutation_importance(model, X, y, n_repeats=5, random_state=random_state, n_jobs=1)
             if len(perm_result.importances_mean) == n_features:
                 df['permutation_importance'] = perm_result.importances_mean
         except Exception as e:
@@ -304,8 +312,13 @@ class ModelExplainer(LoggerMixin):
             is_linear_model = hasattr(model, 'coef_')
             
             if is_tree_model:
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_sample)
+                try:
+                    explainer = shap.TreeExplainer(model)
+                    shap_values = explainer.shap_values(X_sample)
+                except Exception as e:
+                    self.logger.warning(f"TreeExplainer failed ({e}), falling back to KernelExplainer")
+                    explainer = shap.KernelExplainer(model.predict, X_sample)
+                    shap_values = explainer.shap_values(X_sample, nsamples=100)
             elif is_linear_model:
                 explainer = shap.LinearExplainer(model, X_sample)
                 shap_values = explainer.shap_values(X_sample)

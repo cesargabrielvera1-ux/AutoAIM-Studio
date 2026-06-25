@@ -135,6 +135,7 @@ class InferenceEngine(LoggerMixin):
         """Load PyTorch model with lazy import."""
         import torch
         import joblib
+        import torch.nn as nn
         
         self._loaded_pytorch_version = torch.__version__
         
@@ -144,9 +145,37 @@ class InferenceEngine(LoggerMixin):
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found: {model_path}")
         
-        # Load TorchScript model
-        self._model = torch.jit.load(model_path)
-        self._model.eval()
+        # v1.3.0 FIX: Support both TorchScript and full nn.Module formats.
+        # TorchScript is saved with torch.jit.save() and loaded with torch.jit.load().
+        # Full model is saved with torch.save(nn.Module) and loaded with torch.load().
+        model_format = self._manifest.get("model_format", "torchscript")
+        
+        try:
+            if model_format == "full_model":
+                # Load full nn.Module (saved when TorchScript conversion failed)
+                self._model = torch.load(model_path, map_location='cpu')
+                self._model.eval()
+                self._model.cpu()
+                self.logger.info("PyTorch full nn.Module loaded (CPU)")
+            else:
+                # Default: try TorchScript first
+                self._model = torch.jit.load(model_path, map_location='cpu')
+                self._model.eval()
+                self.logger.info("PyTorch TorchScript model loaded (CPU)")
+        except Exception as e:
+            # Fallback: if TorchScript fails, try full model load
+            self.logger.warning(f"Primary load method failed: {e}. Trying alternative...")
+            try:
+                self._model = torch.load(model_path, map_location='cpu')
+                if isinstance(self._model, nn.Module):
+                    self._model.eval()
+                    self._model.cpu()
+                    self.logger.info("PyTorch full nn.Module loaded via fallback (CPU)")
+                else:
+                    raise ValueError(f"Loaded object is not a nn.Module: {type(self._model)}")
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load PyTorch model. Both TorchScript and full model loading failed. "
+                                   f"TorchScript error: {e}. Full model error: {e2}")
         
         # Load preprocessor (required for PyTorch)
         preprocessor_filename = self._manifest.get("preprocessor_filename")

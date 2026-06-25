@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.logger.info(self.hardware.format_info())
         
         # Initialize UI
-        version = "1.2.0"
+        version = "1.3.0"
         window_title = f"AutoAIM Studio: Auto Artificial Intelligence for Materials Studio v{version}"
         self.setWindowTitle(window_title)
         self.setMinimumSize(1400, 900)
@@ -345,16 +345,26 @@ class MainWindow(QMainWindow):
     def _set_application_icon(self):
         """Set application icon from logo.png with fallback to generic icon.
         
-        Tries to load logo.png from the project root directory.
-        If that fails, tries common locations. Falls back silently to
-        the system default icon if no logo is found.
+        Tries to load logo.png from multiple locations:
+        - PyInstaller bundle root (sys._MEIPASS)
+        - Project root (development mode)
+        - Current working directory
+        Falls back to a generic system application icon if logo.png is not found.
         """
-        logo_paths = [
-            Path(__file__).parent.parent.parent / "logo.png",
-            Path(__file__).parent.parent.parent / "assets" / "logo.png",
-            Path(__file__).parent.parent.parent / "images" / "logo.png",
-            Path.cwd() / "logo.png",
-        ]
+        # v1.3.0: Support both development and PyInstaller frozen mode
+        logo_paths = []
+        
+        # 1. PyInstaller bundle (frozen executable)
+        if hasattr(sys, '_MEIPASS'):
+            logo_paths.append(Path(sys._MEIPASS) / "logo.png")
+        
+        # 2. Project root (development mode)
+        logo_paths.append(Path(__file__).parent.parent.parent / "logo.png")
+        logo_paths.append(Path(__file__).parent.parent.parent / "assets" / "logo.png")
+        logo_paths.append(Path(__file__).parent.parent.parent / "images" / "logo.png")
+        
+        # 3. Current working directory
+        logo_paths.append(Path.cwd() / "logo.png")
         
         for logo_path in logo_paths:
             if logo_path.exists():
@@ -451,35 +461,36 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.main_layout.addWidget(self.tabs)
         
-        # Data tab
+        # v1.3.0: Tabs in logical workflow order
+        # 1. Data loading and preprocessing
         self.data_tab = DataTab(self)
         self.tabs.addTab(self.data_tab, "Data")
         
-        # Training tab
+        # 2. Individual model training
         self.training_tab = TrainingTab(self)
         self.tabs.addTab(self.training_tab, "Training")
         
-        # Neural Network Builder tab
-        self.nn_tab = NNBuilderTab(self)
-        self.tabs.addTab(self.nn_tab, "Neural Network")
-        
-        # Optimization tab
+        # 3. Hyperparameter optimization
         self.optimization_tab = OptimizationTab(self)
         self.tabs.addTab(self.optimization_tab, "Optimization")
         
-        # Results tab
-        self.results_tab = ResultsTab(self)
-        self.tabs.addTab(self.results_tab, "Results")
-        
-        # Ensemble tab
+        # 4. Ensemble methods (needs trained models from Training)
         self.ensemble_tab = EnsembleTab(self)
         self.tabs.addTab(self.ensemble_tab, "Ensemble")
         
-        # Explainability tab
+        # 5. Neural Network Builder
+        self.nn_tab = NNBuilderTab(self)
+        self.tabs.addTab(self.nn_tab, "Neural Network")
+        
+        # 6. Results overview (all trained/optimized models)
+        self.results_tab = ResultsTab(self)
+        self.tabs.addTab(self.results_tab, "Results")
+        
+        # 7. Model explainability (needs trained models)
         self.explainability_tab = ExplainabilityTab(self)
         self.tabs.addTab(self.explainability_tab, "Explainability")
         
-        # Inference/Prediction tab
+        # 8. Prediction/Inference (final step)
         self.inference_tab = InferenceTab(self)
         self.tabs.addTab(self.inference_tab, "Predict")
     
@@ -550,13 +561,13 @@ class MainWindow(QMainWindow):
     
     def _show_about(self):
         """Show about dialog."""
-        version = "1.2.0"
+        version = "1.3.0"
         about_text = f"""
         <h2>AutoAIM Studio</h2>
         <p><b>Version:</b> {version}</p>
         <p><b>Codename:</b> Crystal</p>
         <p>An AutoML platform for materials science.</p>
-        <p><b>v1.2.0 Features:</b></p>
+        <p><b>v1.2.1 Features:</b></p>
         <ul>
             <li>Automated machine learning for tabular materials data</li>
             <li>Crystal structure support (CIF, POSCAR, XYZ) with pymatgen featurization</li>
@@ -595,7 +606,7 @@ def run_application():
     
     # Set application info
     app.setApplicationName("AutoAIM Studio")
-    app.setApplicationVersion("1.2.0")
+    app.setApplicationVersion("1.3.0")
     
     # Create and show main window
     window = MainWindow()

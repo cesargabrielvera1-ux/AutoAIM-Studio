@@ -168,9 +168,15 @@ class ModelSaver(LoggerMixin):
         # Save model as TorchScript
         pytorch_model.eval()
         
+        # v1.3.0 FIX: Move model to CPU before TorchScript conversion.
+        # If model is on GPU (CUDA) and example_input is on CPU (default),
+        # torch.jit.trace fails with "Expected all tensors to be on the same device".
+        original_device = next(pytorch_model.parameters()).device
+        pytorch_model = pytorch_model.cpu()
+        
         # Try to convert to TorchScript
         try:
-            # Create example input for tracing
+            # Create example input for tracing (both model and input now on CPU)
             if architecture:
                 example_input = torch.randn(1, architecture.input_dim)
             else:
@@ -193,15 +199,18 @@ class ModelSaver(LoggerMixin):
             traced_model.save(str(model_path))
             
             self._manifest["model_filename"] = "model.pt"
+            self._manifest["model_format"] = "torchscript"
             self.logger.info(f"PyTorch model saved as TorchScript to {model_path}")
             
         except Exception as e:
-            self.logger.warning(f"Could not convert to TorchScript: {e}. Saving state dict instead.")
-            # Fallback: save state dict
-            model_path = output_path / "model_state.pt"
-            torch.save(pytorch_model.state_dict(), model_path)
-            self._manifest["model_filename"] = "model_state.pt"
-            self.logger.info(f"PyTorch state dict saved to {model_path}")
+            self.logger.warning(f"Could not convert to TorchScript: {e}. Saving full model instead.")
+            # v1.3.0 FIX: Save the full nn.Module on CPU instead of just state_dict.
+            # torch.load() can restore it as a proper model for inference.
+            model_path = output_path / "model.pt"
+            torch.save(pytorch_model.cpu(), model_path)
+            self._manifest["model_filename"] = "model.pt"
+            self._manifest["model_format"] = "full_model"
+            self.logger.info(f"PyTorch full model saved to {model_path}")
         
         # Save preprocessor separately if provided
         if preprocessor is not None:

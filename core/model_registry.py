@@ -1,5 +1,6 @@
 """Model registry with all supported ML algorithms."""
 
+import inspect
 import warnings
 from typing import Dict, List, Optional, Any, Type, Union, Callable
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ class ModelRegistry(LoggerMixin):
                     'max_depth': (3, 50, 'int'),
                     'min_samples_split': (2, 20, 'int'),
                     'min_samples_leaf': (1, 20, 'int'),
+                    'max_features': (0.1, 1.0, 'float'),
                 },
                 estimator_class=RandomForestRegressor
             )
@@ -93,6 +95,8 @@ class ModelRegistry(LoggerMixin):
                     'max_depth': (2, 20, 'int'),
                     'learning_rate': (0.001, 1.0, 'float'),
                     'subsample': (0.5, 1.0, 'float'),
+                    'min_samples_split': (2, 20, 'int'),
+                    'min_samples_leaf': (1, 20, 'int'),
                 },
                 estimator_class=GradientBoostingRegressor
             )
@@ -126,6 +130,7 @@ class ModelRegistry(LoggerMixin):
                     'C': (0.001, 1000.0, 'float'),
                     'epsilon': (0.001, 1.0, 'float'),
                     'gamma': (0.0001, 10.0, 'float'),
+                    'kernel': (['rbf', 'linear', 'poly', 'sigmoid'], None, 'categorical'),
                 },
                 estimator_class=SVR
             )
@@ -175,6 +180,8 @@ class ModelRegistry(LoggerMixin):
                         'colsample_bytree': 0.8,
                         'reg_alpha': 0.0,
                         'reg_lambda': 1.0,
+                        'min_child_weight': 1,
+                        'gamma': 0.0,
                         'random_state': 42,
                         'n_jobs': self._hardware.info.recommended_n_jobs,
                         'tree_method': 'gpu_hist' if gpu_available else 'hist'
@@ -187,6 +194,8 @@ class ModelRegistry(LoggerMixin):
                         'colsample_bytree': (0.5, 1.0, 'float'),
                         'reg_alpha': (1e-8, 10.0, 'float'),
                         'reg_lambda': (1e-8, 10.0, 'float'),
+                        'min_child_weight': (1, 20, 'int'),
+                        'gamma': (0.0, 10.0, 'float'),
                     },
                     estimator_class=xgb.XGBRegressor
                 )
@@ -343,6 +352,30 @@ class ModelRegistry(LoggerMixin):
         final_params = model_info.default_params.copy()
         if params:
             final_params.update(params)
+        
+        # v1.3.0 FIX: Filter out parameters the estimator does not accept.
+        # This prevents TypeError when e.g., random_state is passed to SVR
+        # or n_jobs is passed to models that don't support it.
+        try:
+            sig = inspect.signature(estimator_class.__init__)
+            valid_params = set(sig.parameters.keys())
+            # 'self' is always present but not a user param
+            valid_params.discard('self')
+            
+            filtered_params = {
+                k: v for k, v in final_params.items()
+                if k in valid_params
+            }
+            dropped = set(final_params.keys()) - set(filtered_params.keys())
+            if dropped:
+                self.logger.debug(
+                    f"Filtered params for {name}: {dropped} "
+                    f"(not accepted by {estimator_class.__name__})"
+                )
+            final_params = filtered_params
+        except Exception:
+            # If inspection fails, proceed with original params
+            pass
         
         # Create estimator
         estimator = estimator_class(**final_params)
