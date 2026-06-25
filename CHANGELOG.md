@@ -5,7 +5,61 @@ All notable changes to AutoAIM Studio will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
---
+---
+
+## [1.3.0] - 2026-06-25
+
+### Added
+- **Train with Custom Parameters** -- manually configure any regressor's hyperparameters and train directly, bypassing Bayesian optimization:
+  - Dialog with auto-generated parameter widgets for all 7 models, now matching the optimization parameter space:
+    - **Random Forest**: n_estimators, max_depth, min_samples_split, min_samples_leaf, max_features (float or sqrt/log2)
+    - **Gradient Boosting**: n_estimators, max_depth, learning_rate, subsample, min_samples_split, min_samples_leaf
+    - **XGBoost**: n_estimators, max_depth, learning_rate, subsample, colsample_bytree, reg_alpha, reg_lambda, min_child_weight, gamma
+    - **LightGBM**: n_estimators, max_depth, learning_rate, num_leaves, subsample, colsample_bytree, reg_alpha, reg_lambda
+    - **CatBoost**: iterations, depth, learning_rate, l2_leaf_reg (uses `random_seed` instead of `random_state`)
+    - **SVR**: C, epsilon, gamma (scale/auto/numeric), kernel (linear/poly/rbf/sigmoid)
+    - **Ridge**: alpha
+  - Educational tooltips on every parameter explaining what it does and typical values
+  - Dedicated Random State and n_jobs controls for reproducibility testing
+  - Model-specific parameter filtering -- only parameters accepted by the selected model are shown
+- **Full Optimization Parameter Coverage** -- all manually-configurable parameters are now also optimized by Bayesian optimization:
+  - XGBoost: +min_child_weight, +gamma (9 params total)
+  - Random Forest: +max_features (5 params total)
+  - Gradient Boosting: +min_samples_split, +min_samples_leaf (6 params total)
+  - CatBoost: +l2_leaf_reg (4 params total)
+  - SVR: +kernel (categorical: rbf/linear/poly/sigmoid) (4 params total)
+  - Neural Network: +gradient_clip_val (0.0-5.0) in architecture optimization
+- **Manual Ensemble Weights** -- configure custom weights for each model in a weighted-average ensemble:
+  - "Manual Weights" panel with per-model weight spinboxes
+  - "Train with Manual Weights" button trains the ensemble using user-defined weights
+  - Falls back to equal weights if no manual weights are set
+- **NN Training Configuration Expansion** -- 3 new training parameters exposed in the NN Training Config panel:
+  - **LR Scheduler** -- choose from `reduce_on_plateau`, `cosine_annealing`, `step_lr`, `exponential`, or `none`
+  - **Min Delta** -- early stopping minimum improvement threshold (1e-6 to 0.1, default 1e-4)
+  - **Gradient Clip** -- maximum gradient norm for clipping (0 to 10, default 1.0; 0 = disabled)
+- **Educational Tooltips** -- 53 tooltips added across all 4 configuration tabs (Training, Optimization, NN, Ensemble); hover over any spinbox, combo, or checkbox to see what the parameter does
+- **Cross-Validation Fold Breakdown** -- the Model Details dialog now shows a table of per-fold CV scores for all model types (regressors, ensembles, NNs) in both Training and Results tabs
+- **Optimization Results Cleanup** -- trial results table reduced to clean 4-column layout (Rank, Score, Parameters, Trial#); CV fold scores moved to the "Best Trial Details" text panel in the same tabular format as Training Tab
+- **NN Post-Optimization Status Messages** -- progress bar switches to animated indeterminate mode after the last Optuna trial while CV compilation is in progress; prevents the "frozen UI" appearance
+- **Tab Reorder** -- tabs reorganized to logical workflow: Data → Training → Optimization → Ensemble → Neural Network → Results → Explainability → Predict
+
+### Fixed
+- **SVR Gamma Crash** -- `ValueError: could not convert string to float: 'scale'` when selecting SVR in Custom Parameters dialog. Gamma is now a combo box accepting `'scale'`, `'auto'`, or a numeric value.
+- **Gradient Boosting min_samples_leaf** -- `Got 3.0 instead of int` error because QDoubleSpinBox always returns float. Now preserves original int type when the default value is an integer.
+- **CatBoost Random Seed Conflict** -- `only one of random_seed, random_state should be initialized`. Custom Parameters now detects CatBoost and uses `random_seed` instead of `random_state`.
+- **Duplicate Random State** -- `random_state` appeared twice in Custom Parameters dialog (once from model defaults, once in Common Parameters). Now excluded from model-specific list.
+- **NN Tab Overflow** -- action buttons (Auto-Optimize, Apply Best, Train NN) moved to compact 3-column grid; Training Progress log reduced from 150px to 100px
+- **GPU Model Bundle Save** -- TorchScript conversion now moves model to CPU before tracing; fallback saves full nn.Module if TorchScript fails. Inference engine auto-detects format (TorchScript vs full model) on load.
+- **Optimized Model Overwrite** -- sequential optimized models (e.g., XGBoost_Optimized_2) and sequential NNs (Neural Network_2) now preserve all results instead of overwriting; `_get_unique_model_name()` used consistently for all model types
+- **TrainBestThread Overwrite Bug** -- removed code that deliberately deleted previous results to avoid `_1` suffix; now uses proper sequential naming
+
+### Changed
+- `create_estimator()` in `model_registry.py` now filters out parameters not accepted by the estimator class using `inspect.signature()`, preventing TypeError for unsupported parameters (e.g., `random_state` on SVR)
+- `train_neural_network()` in `trainer.py` now uses `_get_unique_model_name()` for consistent sequential naming (same as `train()` for regressors)
+- `results_tab.py` deduplicates results by name before rendering the comparison table
+- `ensemble_trainer.py` `train_ensemble()` accepts optional `weights` parameter for manual weight configuration
+
+---
 
 ## [1.2.0] - 2026-06-14
 
@@ -52,11 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Neural Network hyperparameter optimization with custom range editing for layers, units, dropout, activation, learning rate, batch size, and optimizer selection
-- "Apply Best Parameters to Architecture" button for neural networks — one-click rebuild of the network with optimized hyperparameters
-- "Train with Best Parameters" button for regressors — one-click training using the best model found during optimization
-- Configurable K-fold cross-validation (1–10 folds) for neural network training and optimization
-- Configurable K-fold cross-validation (1–10 folds) for regressor optimization
-- Configurable K-fold cross-validation (1–10 folds) for ensemble training and weight optimization
+- "Apply Best Parameters to Architecture" button for neural networks -- one-click rebuild of the network with optimized hyperparameters
+- "Train with Best Parameters" button for regressors -- one-click training using the best model found during optimization
+- Configurable K-fold cross-validation (1-10 folds) for neural network training and optimization
+- Configurable K-fold cross-validation (1-10 folds) for regressor optimization
+- Configurable K-fold cross-validation (1-10 folds) for ensemble training and weight optimization
 - Ensemble weight optimization using Bayesian optimization (Optuna) to find optimal member contributions
 - New ensemble training engine (`core/ensemble_trainer.py`) supporting weighted average and stacking strategies
 - Dedicated Ensemble Results tab displaying CV scores, member weights, and per-member contributions
@@ -140,7 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-validation and model evaluation
   - k-fold cross-validation
   - Hold-out test set evaluation
-  - Multiple metrics (R², RMSE, MAE, MAPE)
+  - Multiple metrics (R2, RMSE, MAE, MAPE)
 - Visualization capabilities
   - Training progress plots
   - Feature importance charts
@@ -169,34 +223,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned for Future Releases
 
-#### [1.2.0] — Target: Q3 2026
+#### [1.3.0] -- Target: Q4 2026
 - **New Features**
-  - Crystal structure featurization (CIF file support)
-  - Additional elemental properties database
-  - Custom descriptor builder
-  - Batch prediction interface
-  - Model versioning and management
+  - Extended crystallographic featurization (Voronoi analysis, site statistics, graph topology, Coulomb/Sine matrix)
+  - Configurable featurization levels (Basic / Standard / Advanced / Extended) for crystal structures
+  - Configurable featurization levels (Basic / Full / Extended) for formula-based datasets
+  - Multi-target prediction support
+  - Classification mode for categorical properties
+  - Plugin system for custom algorithms
 
 - **Improvements**
-  - Enhanced neural network architectures (CNN, Transformer)
   - Faster featurization with caching
   - Improved GUI responsiveness
   - Better error messages and validation
-
-#### [1.3.0] — Target: Q4 2026
-- **New Features**
-  - Multi-target prediction support
-  - Classification mode for categorical properties
-  - Time-series analysis for degradation modeling
-  - Integration with materials databases (Materials Project, AFLOW)
-
-- **Improvements**
-  - Distributed training support
   - GPU acceleration for neural networks
-  - Advanced visualization options
-  - Plugin system for custom algorithms
 
-#### [2.0.0] — Target: 2027
+#### [2.0.0] -- Target: 2027
 - **New Features**
   - Web-based interface option
   - REST API for integration
@@ -225,10 +267,12 @@ Each release section includes:
 
 ## Version History
 
-| Version | Date       | Description                                                         |
-|---------|------------|---------------------------------------------------------------------|
-| 1.1.0   | 2026-05-18 | Neural network optimization, CV folds, ensemble weight optimization |
-| 1.0.0   | 2026-04-08 | Initial stable release                                              |
+| Version | Date       | Description                                                          |
+|---------|------------|----------------------------------------------------------------------|
+| 1.3.0   | 2026-06-19 | Crystal structures, configurable NN opt, random seed, UI redesign    |
+| 1.2.0   | 2026-06-14 | Crystal structure support, PyInstaller fix, duplicate results fix    |
+| 1.1.0   | 2026-05-18 | Neural network optimization, CV folds, ensemble weight optimization  |
+| 1.0.0   | 2026-04-08 | Initial stable release                                               |
 
 ---
 
@@ -265,8 +309,5 @@ When submitting pull requests, please:
 4. Keep entries concise but descriptive
 
 ---
-
-For detailed migration guides between versions, see the [Migration Guide](docs/MIGRATION.md).
-
 
 For detailed migration guides between versions, see the [Migration Guide](docs/MIGRATION.md).
