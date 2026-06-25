@@ -1,38 +1,48 @@
-# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio V 1.2.0.
+# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio v1.3.0
 
-**AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond!. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, neural network design, hyperparameter optimization, and standalone model deployment.
+**AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, crystal structure analysis, neural network design, hyperparameter optimization, and standalone model deployment.
 
-> ** Auto Aim to predictions in minutes, not days.**
+> **Auto Aim to predictions in minutes, not days.**
 
 ---
 
-## What's New in v1.2.0
+## What's New in v1.3.0
 
-* **Crystal Structure Support** — Load and featurize CIF, POSCAR, and XYZ files with \~154 automatically-extracted crystallographic descriptors (lattice, composition, Magpie, and advanced structural features)
-* **SVR \& KNN Optimization Fix** — Support Vector Machine and k-Nearest Neighbors no longer crash during hyperparameter optimization
-* **PyInstaller Packaging Fix** — Reliable bundling of pymatgen data files for standalone Windows executables
-* **Improved Featurizer UX** — Context-aware messaging distinguishes crystal-structure datasets from CSV formula datasets
-* **Full Backward Compatibility** — All v1.0.0 and v1.1.0 model bundles work without modification
+- **Train with Custom Parameters** — Manually configure all hyperparameters for 7 regressors (RF, GB, XGBoost, LightGBM, CatBoost, SVR, Ridge) including XGB min_child_weight/gamma, SVR kernel selection, RF max_features. All configurable params are also included in Bayesian optimization
+- **Manual Ensemble Weights** — Set custom weights for each model in a weighted-average ensemble instead of relying on Bayesian optimization
+- **53 Educational Tooltips** — Hover over any parameter to see what it does, when to change it, and typical values. Covers all Training, Optimization, NN, and Ensemble parameters
+- **Cross-Validation Fold Breakdown** — Model Details dialog now shows per-fold CV scores as a table for all model types (regressors, ensembles, NNs)
+- **NN Scheduler + Min Delta + Grad Clip** — Full control over learning rate scheduling, early stopping sensitivity, and gradient clipping in the NN Training Config panel
+- **Tab Reorder** — Logical workflow: Data → Training → Optimization → Ensemble → Neural Network → Results → Explainability → Predict
+- **GPU Model Bundle Fix** — Models trained on GPU can now be saved and loaded correctly; CPU-only executables remain unaffected
+
+## Previous Highlights
+
+- **v1.2.0** — Crystal Structure Support (CIF, POSCAR, XYZ), SVR & KNN optimization fix, PyInstaller packaging fix
+- **v1.1.0** — Initial release with AutoML training, neural networks, Bayesian optimization, ensembles, and model deployment
 
 ---
 
 ## Key Features
 
-|Feature|Description|
-|-|-|
-|**Crystal Structure Loading**|Import CIF, POSCAR, CONTCAR, XYZ, and VASP files for automatic featurization|
-|**Crystallographic Featurization**|\~154 descriptors per structure: lattice, composition, Magpie (106), bond analysis, RDF|
-|**Compositional Featurization**|Custom 106-descriptor Magpie generator from chemical formulas (no MatMiner dependency)|
-|**AutoML Training**|Train multiple algorithms simultaneously with cross-validation|
-|**Visual Neural Networks**|Design and train custom PyTorch architectures with a visual interface|
-|**Bayesian Optimization**|Hyperparameter tuning with Optuna for best model performance|
-|**Model Bundles**|Self-contained model packages with manifest.json for reproducibility|
-|**Standalone Prediction**|Deploy trained models for inference without the full application|
-|**Explainability**|SHAP values, permutation importance, and partial dependence plots|
-|**Ensemble Models**|Combine multiple models for improved predictions|
-|**Neural Network Optimization**|Hyperparameter tuning with custom ranges and one-click architecture rebuild|
-|**Ensemble Weight Optimization**|Bayesian optimization of ensemble member weights via Optuna|
-|**Cross-Validation for All Models**|Configurable K-fold CV for regressors, neural networks, and ensembles|
+| Feature | Description |
+|---------|-------------|
+| **Crystal Structure Loading** | Import CIF, POSCAR, CONTCAR, XYZ, and VASP files for automatic featurization |
+| **Crystallographic Featurization** | ~154 descriptors per structure: lattice, composition, Magpie (106), bond analysis, RDF |
+| **Compositional Featurization** | Custom 106-descriptor Magpie generator from chemical formulas (no MatMiner dependency) |
+| **AutoML Training** | Train multiple algorithms simultaneously with cross-validation |
+| **Custom Parameter Training** | Manually configure any regressor's parameters and train without optimization |
+| **Visual Neural Networks** | Design and train custom PyTorch architectures with a visual interface |
+| **Bayesian Optimization** | Hyperparameter tuning with Optuna for regressors and neural networks |
+| **Manual Ensemble Weights** | Set custom weights for each model in a weighted-average ensemble |
+| **Model Bundles** | Self-contained model packages with manifest.json for reproducibility |
+| **Standalone Prediction** | Deploy trained models for inference without the full application |
+| **Explainability** | SHAP values, permutation importance, and partial dependence plots |
+| **Ensemble Models** | Combine multiple models for improved predictions |
+| **Neural Network Optimization** | Hyperparameter tuning with custom ranges and one-click architecture rebuild |
+| **Ensemble Weight Optimization** | Bayesian optimization of ensemble member weights via Optuna |
+| **Cross-Validation for All Models** | Configurable K-fold CV for regressors, neural networks, and ensembles |
+| **Educational Tooltips** | 53 tooltips explaining every parameter across all configuration tabs |
 
 ---
 
@@ -42,26 +52,26 @@ AutoAIM Studio now supports direct loading of crystallographic files:
 
 ### Supported Formats
 
-|Format|Extension|Description|
-|-|-|-|
-|CIF|`.cif`|Crystallographic Information File|
-|POSCAR|`.poscar`|VASP position file|
-|CONTCAR|`.contcar`|VASP continuation file|
-|XYZ|`.xyz`|Cartesian coordinates|
-|VASP|`.vasp`|Generic VASP format|
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| CIF | `.cif` | Crystallographic Information File |
+| POSCAR | `.poscar` | VASP position file |
+| CONTCAR | `.contcar` | VASP continuation file |
+| XYZ | `.xyz` | Cartesian coordinates |
+| VASP | `.vasp` | Generic VASP format |
 
 ### Automatic Feature Extraction
 
-When you load structure files, the application automatically extracts **\~154 numeric features** per structure:
+When you load structure files, the application automatically extracts **~154 numeric features** per structure:
 
-|Category|Count|Examples|
-|-|-|-|
-|**Lattice**|\~10|a, b, c, alpha, beta, gamma, volume, abc\_ratio, symmetry flags|
-|**Composition**|\~13|avg\_atomic\_number, avg\_electronegativity, avg\_ionization\_energy, radii, variance|
-|**Structural**|\~3|volume\_per\_atom, packing\_fraction, spacegroup\_number|
-|**Magpie**|**106**|Weighted mean, std, min, max, median, p25, p75 for 13 elemental properties|
-|**Advanced**|\~15|Bond lengths, coordination numbers, RDF peaks, lattice anisotropy, complexity|
-|**Derived**|\~2|Density, total\_electrons|
+| Category | Count | Examples |
+|----------|-------|----------|
+| **Lattice** | ~10 | a, b, c, alpha, beta, gamma, volume, abc_ratio, symmetry flags |
+| **Composition** | ~13 | avg_atomic_number, avg_electronegativity, avg_ionization_energy, radii, variance |
+| **Structural** | ~3 | volume_per_atom, packing_fraction, spacegroup_number |
+| **Magpie** | **106** | Weighted mean, std, min, max, median, p25, p75 for 13 elemental properties |
+| **Advanced** | ~15 | Bond lengths, coordination numbers, RDF peaks, lattice anisotropy, complexity |
+| **Derived** | ~2 | Density, total_electrons |
 
 These features are pure numeric vectors that feed directly into the AutoAIM training pipeline — no additional preprocessing required.
 
@@ -71,7 +81,7 @@ These features are pure numeric vectors that feed directly into the AutoAIM trai
 2. **Attach Targets:** Provide target values (e.g., band gap, formation energy) via CSV or manual entry
 3. **Train:** The featurized dataset feeds directly into any AutoAIM model (Random Forest, XGBoost, Neural Networks, etc.)
 
-> \*\*Note:\*\* The manual featurizer ("Apply Featurizer" button) is designed for CSV files with a `formula` or `composition` column. Crystal structure datasets are already fully featurized upon loading.
+> **Note:** The manual featurizer ("Apply Featurizer" button) is designed for CSV files with a `formula` or `composition` column. Crystal structure datasets are already fully featurized upon loading.
 
 ---
 
@@ -107,44 +117,61 @@ python -m app.main
 **Requirements:**
 - Python 3.9 or higher
 - 8GB RAM minimum (16GB recommended)
-- CUDA-compatible GPU support only available when running from source code (if you have configured drivers, created a virtual environment and downloaded all requirements. If you want to try follow the instructions for Windows 10/11 if not just run the .exe:
-          1.- Open Power Shell as Admin.
-          2.- Create a Virtual Environment (you must have python 3.11.8). Use the following command: python -m venv venv-gpu
-          3.- Activate the Virtual Environment. Use the following command: venv-gpu\Scripts\activate
-          4.- From this repo download requirements-gpu.txt and the source code and put it in your working directory.
-          5.- FIRST INSTALL THE FOLLOWING: pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-          6.- Then install the remaining requirements using the following command: pip install requirements-gpu.txt
-          7.- Run using python -m app.main
-  NOTE: Following these instructions does not guarantees being able to run AutoAIM from source. Advanced users required. If experiencing problems contact us or just run the .exe
+- CUDA-compatible GPU support only available when running from source code (if you have configured drivers, created a virtual environment and downloaded all requirements). If you want to try follow the instructions for Windows 10/11 if not just run the .exe:
+-  1. Open Power Shell as Admin.
+   2. Create a Virtual Environment (you must have python 3.11.8). Use the following command: python -m venv venv-gpu
+   3. Activate the Virtual Environment. Use the following command: venv-gpu\Scripts\activate
+   4. From this repo download requirements-gpu.txt and the source code and put it in your working directory.
+   5. FIRST INSTALL THE FOLLOWING: pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+   6. Then install the remaining requirements using the following command: pip install requirements-gpu.txt
+   7. Run using python -m app.main
+   8. NOTE: Following these instructions does not guarantees being able to run AutoAIM from source. Advanced users required. If experiencing problems contact us or just run the .exe
           
 
 ---
 
 ## Quick Start
 
-### 1. Load Your Data
+### Tab 1: Data
+- **Load CSV:** Import your dataset (must contain a target column)
+- **Load Crystal Structures:** Import CIF/POSCAR/XYZ files (new in v1.2.0)
+- **Apply Featurizer:** Extract Magpie features from chemical formulas (for CSV datasets)
+- **Set Target:** Select your prediction target column
+- **Split:** Configure train/test split and optional external validation
 
-```
-Data Tab → Load Data → Select your CSV/Excel file
-```
+### Tab 2: Train
+- Select algorithms (Random Forest, XGBoost, LightGBM, Neural Network, etc.)
+- Configure cross-validation folds
+- Click "Train All" and monitor real-time progress
 
-### 2. Select Target & Preprocess
+### Tab 3: Optimization
+- Select algorithm and configure Optuna trials
+- Set custom parameter ranges (optional)
+- Click "Optimize" and review results
+- "Train with Best Parameters" for instant deployment
 
-```
-Select target column → Check preprocessing options → Prepare Data
-```
+### Tab 4: Neural Network
+- Design architecture visually (layers, units, activations)
+- Configure training parameters
+- Train with or without cross-validation
+- Save/load architectures
 
-### 3. Train Models
+### Tab 5: Ensemble
+- Select multiple trained models
+- Choose strategy (weighted average or stacking)
+- Optimize weights with Bayesian optimization
 
-```
-Training Tab → Select algorithms → Train Selected Models
-```
+### Tab 6: Results
+- Review training, optimization, NN, and ensemble results
+- View learning curves and metrics
 
-### 4. Make Predictions
+### Tab 7: Explainability
+- SHAP values, permutation importance, partial dependence plots
+- Model-specific explanations
 
-```
-Predict Tab → Load Model Bundle → Load Prediction Data → Make Predictions
-```
+### Tab 8: Deploy
+- Export trained models as standalone Model Bundles
+- Generate prediction scripts for deployment
 
 ---
 
@@ -189,7 +216,7 @@ Mutiple results showing in real time
 |Document|Description|
 |-|-|
 |[README.md](README.md)|This file — overview and quick start|
-|[RELEASE\_NOTES\_v1.2.0.md](RELEASE_NOTES.md)|Detailed changelog for v1.2.0|
+|[CHANGELOG](CHANGELOG.md)|Detailed changelog for v1.3.0|
 |[USAGE.md](USAGE.md)|Detailed user guide|
 |[USER\_MANUAL.md](USER_MANUAL.md)|Complete manual|
 
@@ -197,13 +224,14 @@ Mutiple results showing in real time
 
 ## Version History
 
-|Version|Date|Highlights|
-|-|-|-|
-|**v1.2.0**|**Jun 2026**|**Crystal Structure Support, SVR/KNN fix, PyInstaller fix**|
-|v1.1.0|May 2026|Neural Network Optimization, CV for all models, Ensemble Weight Optimization|
-|v1.0.0|Mar 2026|Initial release — AutoML pipeline, NN builder, ensembles, deployment|
+| Version | Date | Highlights |
+|---------|------|------------|
+| v1.3.0 | Jun 2026 | Custom parameters, Manual Ensemble Weights, Educational Tooltips, CV Fold Breakdown, More NN Training Config, Tab Reorder |
+| v1.2.0 | Jun 2026 | Crystal Structure Support, SVR/KNN fix, PyInstaller fix |
+| v1.1.0 | May 2026 | Neural Network Optimization, CV for all models, Ensemble Weight Optimization |
+| v1.0.0 | Mar 2026 | Initial release — AutoML pipeline, NN builder, ensembles, deployment 
 
-See [RELEASE\_NOTES\_v1.2.0.md](RELEASE_NOTES.md) for detailed changelog.
+See (RELEASE_NOTES.md) for detailed changelog.
 
 ---
 
@@ -234,7 +262,7 @@ If you use AutoAIM Studio in your research, please cite:
   title = {AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio},
   year = {2026},
   url = {https://github.com/cesargabrielvera1-ux/AutoAIM-Studio},
-  doi = {10.5281/zenodo.19478356}
+  doi = {10.5281/zenodo.20837713}
 }
 ```
 
