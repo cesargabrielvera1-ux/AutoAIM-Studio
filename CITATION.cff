@@ -1,15 +1,15 @@
-# CFF Version 1.3.0
-cff-version: 1.3.0
+# CFF Version 1.4.0
+cff-version: 1.4.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "AutoAIM Studio (Auto Artificial Intelligence for Materials Studio)"
+title: "AutoAIM Studio Auto Artificial Intelligence for Materials Studio"
 authors:
   - names: "Cesar Gabriel Vera de la Garza; Serguei Fomine"
     orcid: "https://orcid.org/0000-0003-2367-3534"; "https://orcid.org/0000-0002-7068-7579"
     affiliation: "National Autonomous University of Mexico. Materials Research Institute."
 repository-code: "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio"
-version: 1.2.0
-date-released: 2026-06-14
+version: 1.3.0
+date-released: 2026-06-25
 keywords:
   - machine learning
   - materials science
@@ -24,7 +24,7 @@ keywords:
 license: MIT
 preferred-citation:
   type: article
-  title: "AutoAIM Studio (Auto Artificial Intelligence for Materials Studio)"
+  title: "AutoAIM Studio: An open-source desktop application for automated machine learning in materials science"
   authors:
     - names: "Cesar Gabriel Vera de la Garza; Serguei Fomine"
   year: 2026
@@ -32,4 +32,4 @@ preferred-citation:
   volume: 0
   issue: 0
   pages: 0
-  doi: 10.5281/zenodo.19478356
+  doi: 10.5281/zenodo.20837713
