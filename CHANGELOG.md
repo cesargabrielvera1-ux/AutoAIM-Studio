@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.3.0] - 2026-06-25
+## [1.4.0] - 2026-06-26
+
+### Added
+- **Select Parameters to Optimize** (v1.4.0) — choose which hyperparameters Optuna optimizes:
+  - Dialog with checkboxes for every parameter of every model
+  - "Select All" / "Select Recommended" / "Clear All" quick buttons
+  - Recommended mode selects only high-impact parameters for faster CPU optimization
+  - Educational tooltips on each parameter explaining its impact level
+  - Available for both regressor optimization (Optimization Tab) and NN architecture optimization (NN Tab)
+- **LightGBM min_child_samples** — added to manual configuration and Bayesian optimization (9 params total for LightGBM)
+- **Random State actually works** — changing the random seed in Custom Parameters now produces different results:
+  - Train/test split uses the seed from the dialog (was hardcoded to 42)
+  - KFold CV uses the model's random_state (extracted via `get_params()`)
+  - NN CV uses `TrainingConfig.random_seed`
+- **High-precision parameter input** — Custom Parameters dialog now shows 10-12 decimal places (was 6-8) for fine sensitivity testing
+- **NN Tab redesign** — compact layout: Actions + Presets merged into single toolbar, all 4 right panels have limited height, more horizontal space for configuration
+- **Training Results populated** — the epoch-by-epoch table in NN Tab now shows Train Loss, Val Loss, Train Metric, Val Metric, and Time for each epoch
+
+### Fixed
+- **Ensemble results not appearing in Results Tab** — `get_ensemble_trainer()` (inexistent method) changed to direct attribute access
+- **Ensemble results duplicated** — removed code that saved ensembles to both `ensemble_trainer.results` and `trainer.results`
+- **Manual models not deletable** — delete now searches in `training_tab.training_results` as well as `trainer.results`
+- **Optimizer/Registry parameter desync** — 7 parameters were in `model_registry` but not in `optimizer.py` (GB min_samples_leaf, LGBM reg_alpha/reg_lambda, SVR epsilon, Ridge alpha, SVR kernel missing 'linear')
+- **Safe parent access** — `_safe_get_parent_attr()` helper replaces ~50 direct `self.parent.*` accesses across all GUI tabs, preventing AttributeError crashes
+- **Thread error reporting** — all training/optimization threads now include full traceback in error messages
+- **Logging unified** — replaced `print()` calls with `logger.info/debug/warning/error` across the GUI
+
+---
+
+## [1.3.0] - 2026-06-24
 
 ### Added
 - **Train with Custom Parameters** -- manually configure any regressor's hyperparameters and train directly, bypassing Bayesian optimization:
@@ -310,4 +339,4 @@ When submitting pull requests, please:
 
 ---
 
-For detailed migration guides between versions, see the [Migration Guide](docs/MIGRATION.md).
+
