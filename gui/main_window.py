@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.logger.info(self.hardware.format_info())
         
         # Initialize UI
-        version = "1.3.0"
+        version = "1.4.0"
         window_title = f"AutoAIM Studio: Auto Artificial Intelligence for Materials Studio v{version}"
         self.setWindowTitle(window_title)
         self.setMinimumSize(1400, 900)
@@ -561,7 +561,7 @@ class MainWindow(QMainWindow):
     
     def _show_about(self):
         """Show about dialog."""
-        version = "1.3.0"
+        version = "1.4.0"
         about_text = f"""
         <h2>AutoAIM Studio</h2>
         <p><b>Version:</b> {version}</p>
@@ -606,7 +606,7 @@ def run_application():
     
     # Set application info
     app.setApplicationName("AutoAIM Studio")
-    app.setApplicationVersion("1.3.0")
+    app.setApplicationVersion("1.4.0")
     
     # Create and show main window
     window = MainWindow()

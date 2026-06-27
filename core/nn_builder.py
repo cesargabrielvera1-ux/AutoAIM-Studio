@@ -94,6 +94,7 @@ class TrainingConfig:
     early_stopping_patience: int = 50
     early_stopping_min_delta: float = 1e-4
     gradient_clip_val: float = 1.0
+    random_seed: int = 42
     use_mixed_precision: bool = False
     
     def __post_init__(self):
@@ -447,7 +448,8 @@ class NeuralNetworkBuilder(LoggerMixin):
         l2_reg: float = 0.0,
         early_stopping_patience: int = 50,
         early_stopping_min_delta: float = 1e-4,
-        gradient_clip_val: float = 1.0
+        gradient_clip_val: float = 1.0,
+        random_seed: int = 42
     ) -> TrainingConfig:
         """Create training configuration.
         
@@ -463,6 +465,7 @@ class NeuralNetworkBuilder(LoggerMixin):
             early_stopping_patience: Patience for early stopping
             early_stopping_min_delta: Minimum delta for early stopping
             gradient_clip_val: Max gradient norm for clipping (0 to disable)
+            random_seed: Random seed for reproducible CV folds
             
         Returns:
             Training configuration
@@ -478,7 +481,8 @@ class NeuralNetworkBuilder(LoggerMixin):
             l2_reg=l2_reg,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
-            gradient_clip_val=gradient_clip_val
+            gradient_clip_val=gradient_clip_val,
+            random_seed=random_seed
         )
         
         return self._training_config

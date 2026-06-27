@@ -622,45 +622,8 @@ class EnsembleTab(QWidget):
         self.train_manual_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
-        # Store the result in the main trainer's results dict so it appears in Results tab
-        if self.parent and hasattr(self.parent, 'training_tab'):
-            try:
-                trainer = self.parent.training_tab.get_trainer()
-                ens_name = f"Ensemble_{result.ensemble_type}_{len(result.model_names)}models"
-                
-                # Create a TrainingResult-compatible wrapper for the Results tab
-                from ..core.trainer import TrainingResult
-                from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-                
-                # Use ensemble metrics directly
-                metrics = dict(result.metrics)
-                # Ensure standard metric keys exist
-                if 'rmse' not in metrics and 'r2' in metrics:
-                    metrics['rmse'] = 0.0
-                if 'mae' not in metrics and 'r2' in metrics:
-                    metrics['mae'] = 0.0
-                
-                training_result = TrainingResult(
-                    model=result,  # Store the EnsembleResult as the model
-                    model_name=ens_name,
-                    problem_type=result.problem_type,
-                    metrics=metrics,
-                    cv_metrics={'test_score': result.cv_scores} if result.cv_scores else {},
-                    training_time=result.training_time,
-                    feature_importance=None,
-                    predictions=result.predictions,
-                    true_values=result.true_values,
-                    is_neural_network=False
-                )
-                trainer.results[ens_name] = training_result
-                self.progress_text.append(f"Added '{ens_name}' to Results tab")
-            except Exception as e:
-                self.progress_text.append(f"Warning: Could not add to Results tab: {e}")
-        
-        # v1.3.0: Ensemble results are already stored in ensemble_trainer.results
-        # by train_ensemble(). Do NOT duplicate in trainer.results to avoid
-        # triplicated entries in the Results tab.
-        
+        # v1.3.0: Ensemble results are stored in ensemble_trainer.results ONLY.
+        # Do NOT duplicate in trainer.results to avoid duplicated entries.
         self._display_results(result)
         
         score_msg = ""

@@ -218,6 +218,7 @@ class ModelRegistry(LoggerMixin):
                 'max_depth': -1,
                 'learning_rate': 0.1,
                 'num_leaves': 31,
+                'min_child_samples': 20,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
                 'reg_alpha': 0.0,
@@ -247,6 +248,7 @@ class ModelRegistry(LoggerMixin):
                         'max_depth': (3, 50, 'int'),  # FIX: Changed from -1 to 3 as minimum to avoid issues
                         'learning_rate': (0.001, 0.5, 'float'),
                         'num_leaves': (10, 200, 'int'),
+                        'min_child_samples': (1, 100, 'int'),
                         'subsample': (0.5, 1.0, 'float'),
                         'colsample_bytree': (0.5, 1.0, 'float'),
                         'reg_alpha': (1e-8, 10.0, 'float'),

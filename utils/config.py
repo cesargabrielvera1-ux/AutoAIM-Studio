@@ -45,7 +45,7 @@ class AppConfig:
     """Main application configuration."""
     app_name: str = "AutoAIM Studio"
     full_name: str = "Auto Artificial Intelligence for Materials Studio"
-    version: str = "1.0.0"
+    version: str = "1.4.0"
     theme: str = "dark"
     auto_save: bool = True
     auto_save_interval: int = 300

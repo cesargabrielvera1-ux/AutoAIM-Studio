@@ -73,7 +73,7 @@ def print_banner():
     banner = """
     ╔═══════════════════════════════════════════════════════════════╗
     ║                                                               ║
-    ║           Materials AutoML Studio v1.0.0                      ║
+    ║           Materials AutoML Studio v1.4.0                      ║
     ║                                                               ║
     ║   Automated Machine Learning for Materials Science           ║
     ║                                                               ║

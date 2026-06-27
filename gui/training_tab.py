@@ -185,9 +185,11 @@ class ManualParamDialog(QDialog):
                 spin = QDoubleSpinBox()
                 spin.setRange(float(min_val), float(max_val))
                 spin.setValue(float(default_val) if default_val is not None else float(min_val))
-                spin.setDecimals(6)
+                # v1.3.0: High precision for sensitivity testing (was 6-8, now 10-12)
+                spin.setDecimals(10)
                 if param_name in ('reg_alpha', 'reg_lambda', 'l2_leaf_reg'):
-                    spin.setDecimals(8)
+                    spin.setDecimals(12)
+                spin.setSingleStep(10 ** (-spin.decimals()))
                 spin.setMinimumWidth(180)
                 self._apply_tooltip(spin, param_name)
                 self.scroll_layout.addWidget(spin, row, 1)
@@ -407,12 +409,15 @@ class TrainingThread(QThread):
                 self.X_train, self.y_train,
                 self.X_test, self.y_test,
                 self.problem_type,
-                feature_names=self.feature_names,  # FIX: Pasar feature_names
+                feature_names=self.feature_names,
                 progress_callback=progress_callback
             )
             self.finished.emit(result)
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"TrainingThread error: {e}\n{tb}")
+            self.error.emit(f"{e}\n\n{tb}")
 
 
 class TrainingTab(QWidget):
@@ -648,13 +653,18 @@ class TrainingTab(QWidget):
         if not model_name:
             return
         
+        # v1.3.0 FIX: Use the random_state from custom_params for data splitting,
+        # not the Training Tab's random_spin. This ensures sensitivity tests work.
+        rs = custom_params.get('random_state', self.random_spin.value())
+        
         # Prepare data
         try:
             self.log_text.append(f"Preparing data for custom training: {model_name}...")
+            self.log_text.append(f"Using random_state={rs} for train/test split")
             use_validation = data_manager.validation_data is not None
             X_train, X_test, y_train, y_test = data_manager.prepare_data(
                 test_size=self.test_spin.value(),
-                random_state=self.random_spin.value(),
+                random_state=rs,
                 use_validation=use_validation
             )
             self.log_text.append(f"Training set: {X_train.shape}, Test set: {X_test.shape}")

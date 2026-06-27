@@ -1,5 +1,6 @@
 """Hyperparameter Optimization tab."""
 
+import logging
 import numpy as np
 import pandas as pd
 from PyQt6.QtWidgets import (
@@ -12,6 +13,27 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from ..core.optimizer import HyperparameterOptimizer, OptimizationResult
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_get_parent_attr(widget, attr_path, default=None):
+    """Safely get a nested attribute from widget.parent."""
+    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+        return default
+    parts = attr_path.split('.')
+    obj = widget.parent
+    try:
+        for part in parts:
+            if part.endswith('()'):
+                obj = getattr(obj, part[:-2])()
+            else:
+                if not hasattr(obj, part):
+                    return default
+                obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return default
 
 
 class ParameterRangeDialog(QDialog):
@@ -125,6 +147,135 @@ class ParameterRangeDialog(QDialog):
         return result
 
 
+class OptimizationParamSelectorDialog(QDialog):
+    """v1.4.0: Dialog for selecting which parameters to optimize.
+    
+    Shows checkboxes for all parameters in param_ranges.
+    Recommended set selects high-impact parameters only.
+    """
+    
+    HIGH_IMPACT_PARAMS = {
+        'random_forest': ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf'],
+        'gradient_boosting': ['n_estimators', 'max_depth', 'learning_rate', 'subsample'],
+        'xgboost': ['n_estimators', 'max_depth', 'learning_rate', 'subsample', 'colsample_bytree', 'min_child_weight', 'gamma'],
+        'lightgbm': ['n_estimators', 'max_depth', 'learning_rate', 'num_leaves', 'subsample', 'colsample_bytree'],
+        'catboost': ['iterations', 'depth', 'learning_rate'],
+        'svr': ['C', 'gamma', 'kernel'],
+        'ridge': ['alpha'],
+    }
+    
+    PARAM_TOOLTIPS = {
+        'n_estimators': "Number of trees/iterations. High impact on accuracy.",
+        'max_depth': "Tree depth. High impact on model complexity and overfitting.",
+        'learning_rate': "Step size. High impact on convergence speed and stability.",
+        'subsample': "Fraction of samples per round. Medium-high regularization impact.",
+        'colsample_bytree': "Fraction of features per tree. Medium regularization impact.",
+        'reg_alpha': "L1 regularization. Medium impact on feature sparsity.",
+        'reg_lambda': "L2 regularization. Medium impact on weight shrinkage.",
+        'min_child_weight': "Min sum of instance weight in child. Medium-high overfitting control.",
+        'gamma': "Min loss reduction for split. Medium impact on tree conservativeness.",
+        'num_leaves': "Leaves per tree (LightGBM). High impact on complexity.",
+        'iterations': "Boosting rounds (CatBoost). High impact on accuracy.",
+        'depth': "Tree depth (CatBoost). High impact on complexity.",
+        'l2_leaf_reg': "L2 regularization (CatBoost). Medium impact.",
+        'min_samples_split': "Min samples to split. Medium impact on overfitting.",
+        'min_samples_leaf': "Min samples in leaf. Medium impact on overfitting.",
+        'max_features': "Features per split. Medium impact with many features.",
+        'C': "Regularization strength. High impact on SVM.",
+        'epsilon': "Epsilon-tube width. Low-medium impact.",
+        'gamma': "Kernel coefficient. High impact on SVM.",
+        'kernel': "Kernel type. High impact on SVM (but increases search space 4x).",
+        'alpha': "Regularization strength. High impact on Ridge.",
+    }
+    
+    def __init__(self, algorithm, param_ranges, selected_params, parent=None):
+        super().__init__(parent)
+        self.algorithm = algorithm
+        self.param_ranges = param_ranges
+        self.selected_params = selected_params or {}
+        self.checkboxes = {}
+        
+        self.setWindowTitle(f"Select Parameters to Optimize — {algorithm}")
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(400)
+        
+        layout = QVBoxLayout(self)
+        
+        info = QLabel(
+            "Checked parameters will be optimized by Bayesian search. "
+            "Unchecked parameters use their default values. "
+            "Fewer checked parameters = faster optimization."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        # Quick selection buttons
+        btn_layout = QHBoxLayout()
+        
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(self._select_all)
+        btn_layout.addWidget(select_all_btn)
+        
+        select_rec_btn = QPushButton("Select Recommended")
+        select_rec_btn.setToolTip("Select only high-impact parameters for faster optimization")
+        select_rec_btn.clicked.connect(self._select_recommended)
+        btn_layout.addWidget(select_rec_btn)
+        
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all)
+        btn_layout.addWidget(clear_all_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Scrollable checkbox list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        
+        for param_name in sorted(param_ranges.keys()):
+            cb = QCheckBox(param_name)
+            cb.setChecked(self.selected_params.get(param_name, True))
+            
+            # Tooltip with impact level
+            tooltip = self.PARAM_TOOLTIPS.get(param_name, "")
+            ptype = param_ranges[param_name][2] if len(param_ranges[param_name]) > 2 else ''
+            range_info = f"({ptype})"
+            cb.setToolTip(f"{tooltip} {range_info}" if tooltip else range_info)
+            
+            scroll_layout.addWidget(cb)
+            self.checkboxes[param_name] = cb
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+        
+        # OK/Cancel
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def _select_all(self):
+        for cb in self.checkboxes.values():
+            cb.setChecked(True)
+    
+    def _clear_all(self):
+        for cb in self.checkboxes.values():
+            cb.setChecked(False)
+    
+    def _select_recommended(self):
+        recommended = self.HIGH_IMPACT_PARAMS.get(self.algorithm, set(self.checkboxes.keys()))
+        for name, cb in self.checkboxes.items():
+            cb.setChecked(name in recommended)
+    
+    def get_selected_params(self):
+        """Return dict of param_name -> bool for selected parameters."""
+        return {name: cb.isChecked() for name, cb in self.checkboxes.items()}
+
+
 class OptimizationThread(QThread):
     """Thread for running hyperparameter optimization."""
     progress = pyqtSignal(int, float, dict)
@@ -227,6 +378,7 @@ class OptimizationTab(QWidget):
         self.optimizer = HyperparameterOptimizer()
         self.optimization_results = []
         self.custom_param_ranges = {}
+        self.selected_opt_params = {}  # v1.4.0: param_name -> bool for each model type
         self.last_opt_result = None  # Store last optimization result for "Apply" button
         
         self._init_ui()
@@ -313,17 +465,33 @@ class OptimizationTab(QWidget):
         )
         opt_layout.addWidget(self.pruning_check, 4, 0, 1, 2)
         
-        self.edit_ranges_btn = QPushButton("Edit Parameter Ranges")
-        self.edit_ranges_btn.clicked.connect(self._edit_parameter_ranges)
-        opt_layout.addWidget(self.edit_ranges_btn, 5, 0, 1, 2)
+        # v1.4.0: Compact 3-button toolbar (was 3 separate rows)
+        btn_style = "QPushButton{padding:3px 6px;font-size:8pt;}"
         
-        self.reset_ranges_btn = QPushButton("Reset Ranges to Default")
+        self.select_params_btn = QPushButton("Select Params")
+        self.select_params_btn.setStyleSheet(btn_style)
+        self.select_params_btn.setToolTip(
+            "Choose which hyperparameters Optuna will optimize. "
+            "Unselect low-impact parameters to speed up optimization on CPU."
+        )
+        self.select_params_btn.clicked.connect(self._select_opt_params)
+        opt_layout.addWidget(self.select_params_btn, 5, 0)
+        
+        self.edit_ranges_btn = QPushButton("Edit Ranges")
+        self.edit_ranges_btn.setStyleSheet(btn_style)
+        self.edit_ranges_btn.clicked.connect(self._edit_parameter_ranges)
+        opt_layout.addWidget(self.edit_ranges_btn, 5, 1)
+        
+        self.reset_ranges_btn = QPushButton("Reset")
+        self.reset_ranges_btn.setStyleSheet(btn_style)
         self.reset_ranges_btn.clicked.connect(self._reset_parameter_ranges)
         self.reset_ranges_btn.setEnabled(False)
-        opt_layout.addWidget(self.reset_ranges_btn, 6, 0, 1, 2)
+        opt_layout.addWidget(self.reset_ranges_btn, 5, 2)
         
-        self.ranges_label = QLabel("Using default ranges")
-        opt_layout.addWidget(self.ranges_label, 7, 0, 1, 2)
+        # Single compact status label
+        self.ranges_label = QLabel("Default ranges, all params")
+        self.ranges_label.setStyleSheet("color: #888888; font-size: 7pt;")
+        opt_layout.addWidget(self.ranges_label, 5, 3)
         
         left_layout.addWidget(opt_group)
         
@@ -421,7 +589,47 @@ class OptimizationTab(QWidget):
     
     def _on_model_type_changed(self):
         """Handle model type change."""
-        pass  # Parameter ranges are set per algorithm
+        # v1.4.0: Update the selected params label
+        model_type = self.model_type_combo.currentText()
+        algo = model_type.lower().replace(' ', '_')
+        selected = self.selected_opt_params.get(algo)
+        if selected:
+            n_checked = sum(1 for v in selected.values() if v)
+            n_total = len(selected)
+            self.ranges_label.setText(f"Custom: {n_checked}/{n_total} params")
+        else:
+            param_ranges = self.optimizer.get_param_ranges(model_type)
+            n_total = len(param_ranges) if param_ranges else 0
+            self.ranges_label.setText(f"Default ranges, all {n_total} params")
+    
+    def _select_opt_params(self):
+        """v1.4.0: Open dialog to select which parameters to optimize."""
+        model_type = self.model_type_combo.currentText()
+        algorithm = model_type.lower().replace(' ', '_')
+        
+        # Get param_ranges for this model
+        param_ranges = self.custom_param_ranges.get(model_type)
+        if param_ranges is None:
+            param_ranges = self.optimizer.get_param_ranges(model_type)
+        
+        if not param_ranges:
+            QMessageBox.warning(self, "Warning", f"No parameter ranges for {model_type}")
+            return
+        
+        # Open selector dialog
+        dialog = OptimizationParamSelectorDialog(
+            algorithm, param_ranges,
+            self.selected_opt_params.get(algorithm),
+            self
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.selected_opt_params[algorithm] = dialog.get_selected_params()
+            n_checked = sum(1 for v in dialog.get_selected_params().values() if v)
+            n_total = len(dialog.get_selected_params())
+            self.ranges_label.setText(
+                f"Custom: {n_checked}/{n_total} params"
+            )
     
     def _edit_parameter_ranges(self):
         """Open dialog to edit parameter ranges."""
@@ -447,7 +655,7 @@ class OptimizationTab(QWidget):
     
     def _start_optimization(self):
         """Start optimization."""
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
             return
@@ -473,6 +681,20 @@ class OptimizationTab(QWidget):
         param_ranges = self.custom_param_ranges.get(model_type)
         if param_ranges is None:
             param_ranges = self.optimizer.get_param_ranges(algorithm)
+        
+        # v1.4.0: Filter param_ranges to only selected parameters
+        algo_key = algorithm.lower().replace(' ', '_')
+        selected = self.selected_opt_params.get(algo_key)
+        if selected:
+            param_ranges = {
+                k: v for k, v in param_ranges.items()
+                if selected.get(k, True)
+            }
+            if not param_ranges:
+                QMessageBox.warning(self, "Warning", 
+                    "No parameters selected for optimization. "
+                    "Please use 'Select Parameters to Optimize' to choose at least one parameter.")
+                return
         
         # Start optimization
         self.optimize_btn.setEnabled(False)
@@ -542,12 +764,12 @@ class OptimizationTab(QWidget):
             QMessageBox.warning(self, "Warning", "No optimization result available. Run optimization first.")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
             return
         
-        trainer = self.parent.training_tab.get_trainer()
+        trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
         if trainer is None:
             QMessageBox.warning(self, "Warning", "Trainer not available!")
             return
@@ -645,8 +867,8 @@ class OptimizationTab(QWidget):
             details += f"CV Score: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}\n"
         
         # v1.3.0: Merge best_params with model defaults so ALL parameters are shown.
-        # Optuna's best_params only includes sampled parameters; we fill in the rest
-        # from the model's default_params for a complete picture.
+        # Mark with (*) all parameters that Optuna CAN optimize (from param_ranges),
+        # not just those explicitly present in best_params (which may omit defaults).
         from ..core.model_registry import ModelRegistry
         registry = ModelRegistry()
         algorithm = self.model_type_combo.currentText().lower().replace(' ', '_')
@@ -654,17 +876,21 @@ class OptimizationTab(QWidget):
             model_info = registry.get_model(algorithm)
             full_params = dict(model_info.default_params)  # Start with all defaults
             full_params.update(result.best_params)  # Override with optimized values
+            # Get the set of optimizable params from param_ranges
+            optimizable = set(model_info.param_ranges.keys())
             # Remove internal/fixed params that aren't tunable
             for p in ('random_state', 'n_jobs', 'verbose', 'random_seed', 'tree_method'):
                 full_params.pop(p, None)
+                optimizable.discard(p)
         except Exception:
-            full_params = result.best_params  # Fallback to Optuna's params only
+            full_params = result.best_params
+            optimizable = set(result.best_params.keys())
         
         details += "\nBest Parameters:\n"
         for param, value in sorted(full_params.items()):
-            marker = " *" if param in result.best_params else "  "
+            marker = " *" if param in optimizable else "  "
             details += f"{marker}{param}: {value}\n"
-        details += "\n(*) = optimized by Optuna\n"
+        details += "\n(*) = parameter included in Bayesian optimization\n"
         self.details_text.setPlainText(details)
         
         # v1.3.0: Display top trials in table (clean 4-column format)

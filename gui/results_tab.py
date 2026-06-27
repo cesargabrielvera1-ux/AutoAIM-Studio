@@ -1,5 +1,7 @@
 """Results and model export tab."""
 
+import logging
+import traceback
 import numpy as np
 import pandas as pd
 from PyQt6.QtWidgets import (
@@ -13,6 +15,38 @@ from PyQt6.QtGui import QColor
 
 from ..core.trainer import ModelTrainer
 from ..core.ensemble_trainer import EnsembleResult
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_get_parent_attr(widget, attr_path, default=None):
+    """Safely get a nested attribute from widget.parent.
+    
+    Args:
+        widget: The widget that has a .parent attribute
+        attr_path: Dot-separated path like 'training_tab.get_trainer'
+        default: Value to return if path cannot be resolved
+        
+    Returns:
+        The resolved attribute or default
+    """
+    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+        return default
+    
+    parts = attr_path.split('.')
+    obj = widget.parent
+    
+    try:
+        for part in parts:
+            if part.endswith('()'):
+                obj = getattr(obj, part[:-2])()
+            else:
+                if not hasattr(obj, part):
+                    return default
+                obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return default
 
 
 class ResultsTab(QWidget):
@@ -165,12 +199,11 @@ class ResultsTab(QWidget):
         
         try:
             # Get trainer results
-            if hasattr(self.parent, 'training_tab'):
-                trainer = self.parent.training_tab.get_trainer()
-                if trainer and trainer.results:
-                    for name, result in trainer.results.items():
-                        if result is not None:
-                            all_results.append((name, result, "Trained"))
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
+            if trainer and trainer.results:
+                for name, result in trainer.results.items():
+                    if result is not None:
+                        all_results.append((name, result, "Trained"))
             
             # v1.2.0 FIX: Do NOT show optimization_results here.
             # When the user clicks "Train with Best Parameters", a proper
@@ -184,9 +217,8 @@ class ResultsTab(QWidget):
             # train_neural_network() registers in BOTH trainer.results AND
             # nn_training_results, so the same model would appear twice.
             trainer_names = {name for name, _, _ in all_results}
-            if hasattr(self.parent, 'nn_tab'):
-                nn_tab = self.parent.nn_tab
-                if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
+            if nn_tab and hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                     for nn_name, nn_result in nn_tab.nn_training_results:
                         if nn_result is not None and nn_name not in trainer_names:
                             all_results.append((
@@ -201,12 +233,11 @@ class ResultsTab(QWidget):
                 # the intermediate NN optimization result creates a duplicate.
             
             # Get ensemble results
-            if hasattr(self.parent, 'ensemble_tab'):
-                ens_tab = self.parent.ensemble_tab
-                if hasattr(ens_tab, 'get_ensemble_trainer'):
+            ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
+            if ens_tab and hasattr(ens_tab, 'ensemble_trainer') and ens_tab.ensemble_trainer:
                     try:
-                        ens_trainer = ens_tab.get_ensemble_trainer()
-                        if ens_trainer and hasattr(ens_trainer, 'results') and ens_trainer.results:
+                        ens_trainer = ens_tab.ensemble_trainer
+                        if hasattr(ens_trainer, 'results') and ens_trainer.results:
                             for ens_name, ens_result in ens_trainer.results.items():
                                 if ens_result is not None:
                                     all_results.append((
@@ -228,8 +259,8 @@ class ResultsTab(QWidget):
                     
         except Exception as e:
             import traceback
-            error_msg = f"Failed to refresh results: {str(e)}\n\n{traceback.format_exc()}"
-            print(error_msg)
+            error_msg = f"Failed to refresh results: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             QMessageBox.warning(
                 self, "Refresh Error",
                 f"Could not refresh results table.\n\nError: {str(e)}\n\n"
@@ -443,41 +474,58 @@ class ResultsTab(QWidget):
             return
         
         deleted = False
-        original_count = 0
-        new_count = 0
+        locations_checked = []
         
-        # 1. Try trainer.results (training + optimized models)
-        trainer = None
-        if self.parent and hasattr(self.parent, 'training_tab'):
-            trainer = self.parent.training_tab.get_trainer()
-        if trainer and model_name in trainer.results:
-            del trainer.results[model_name]
-            deleted = True
+        # 1. Try trainer.results (primary storage for trained/optimized/manual models)
+        trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
+        if trainer:
+            locations_checked.append(f"trainer.results keys: {list(trainer.results.keys())}")
+            if model_name in trainer.results:
+                del trainer.results[model_name]
+                deleted = True
+                logger.info(f"Deleted '{model_name}' from trainer.results")
         
-        # 2. Try NN training results
-        if self.parent and hasattr(self.parent, 'nn_tab'):
-            nn_tab = self.parent.nn_tab
-            if hasattr(nn_tab, 'nn_training_results'):
-                original_count = len(nn_tab.nn_training_results)
-                nn_tab.nn_training_results = [
-                    (n, r) for n, r in nn_tab.nn_training_results if n != model_name
-                ]
-                new_count = len(nn_tab.nn_training_results)
-                if new_count < original_count:
-                    deleted = True
+        # 2. Try training_tab.training_results (local list, includes manual models)
+        training_tab = _safe_get_parent_attr(self, 'training_tab')
+        if training_tab and hasattr(training_tab, 'training_results'):
+            orig = len(training_tab.training_results)
+            training_tab.training_results = [
+                r for r in training_tab.training_results 
+                if getattr(r, 'model_name', None) != model_name
+            ]
+            if len(training_tab.training_results) < orig:
+                deleted = True
+                logger.info(f"Deleted '{model_name}' from training_tab.training_results")
         
-        # 3. Try ensemble results
-        if self.parent and hasattr(self.parent, 'ensemble_tab'):
-            ens_tab = self.parent.ensemble_tab
-            if hasattr(ens_tab, 'ensemble_trainer') and ens_tab.ensemble_trainer:
-                if model_name in ens_tab.ensemble_trainer.results:
-                    del ens_tab.ensemble_trainer.results[model_name]
-                    deleted = True
+        # 3. Try NN training results
+        nn_tab = _safe_get_parent_attr(self, 'nn_tab')
+        if nn_tab and hasattr(nn_tab, 'nn_training_results'):
+            orig = len(nn_tab.nn_training_results)
+            nn_tab.nn_training_results = [
+                (n, r) for n, r in nn_tab.nn_training_results if n != model_name
+            ]
+            if len(nn_tab.nn_training_results) < orig:
+                deleted = True
+                logger.info(f"Deleted '{model_name}' from nn_training_results")
+        
+        # 4. Try ensemble results
+        ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
+        if ens_tab and hasattr(ens_tab, 'ensemble_trainer') and ens_tab.ensemble_trainer:
+            if model_name in ens_tab.ensemble_trainer.results:
+                del ens_tab.ensemble_trainer.results[model_name]
+                deleted = True
+                logger.info(f"Deleted '{model_name}' from ensemble_trainer.results")
         
         if deleted:
             self._refresh_results()
         else:
-            QMessageBox.warning(self, "Warning", f"Could not find '{model_name}' to delete.")
+            logger.warning(f"Could not find '{model_name}' to delete. Checked: {locations_checked}")
+            QMessageBox.warning(
+                self, "Warning", 
+                f"Could not find '{model_name}' to delete.\n\n"
+                f"The model may have already been deleted, or it may be "
+                f"stored in a different location. Try refreshing the results."
+            )
     
     def _show_model_details(self):
         """Show model details for trained, optimized, and neural network models."""
@@ -493,14 +541,14 @@ class ResultsTab(QWidget):
         
         # 1. Check trained models
         if hasattr(self.parent, 'training_tab'):
-            trainer = self.parent.training_tab.get_trainer()
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             if model_name in trainer.results:
                 result = trainer.results[model_name]
                 source_type = "Trained Model"
         
         # 2. Check optimized models
         if result is None and hasattr(self.parent, 'optimization_tab'):
-            opt_tab = self.parent.optimization_tab
+            opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
             if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                 for opt_name, opt_result in opt_tab.optimization_results:
                     if f"{opt_name} (Optimized)" == model_name:
@@ -510,7 +558,7 @@ class ResultsTab(QWidget):
         
         # 3. Check neural networks
         if result is None and hasattr(self.parent, 'nn_tab'):
-            nn_tab = self.parent.nn_tab
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
             if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                 for nn_name, nn_result in nn_tab.nn_training_results:
                     if nn_name == model_name:
@@ -528,7 +576,7 @@ class ResultsTab(QWidget):
         
         # 4. Check ensemble models
         if result is None and hasattr(self.parent, 'ensemble_tab'):
-            ens_tab = self.parent.ensemble_tab
+            ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
             if hasattr(ens_tab, 'get_ensemble_trainer'):
                 ens_trainer = ens_tab.get_ensemble_trainer()
                 if ens_trainer and hasattr(ens_trainer, 'results') and ens_trainer.results:
@@ -692,7 +740,7 @@ class ResultsTab(QWidget):
         if file_path:
             try:
                 if self.parent and hasattr(self.parent, 'training_tab'):
-                    trainer = self.parent.training_tab.get_trainer()
+                    trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
                     trainer.save_model(model_name, file_path)
                     QMessageBox.information(self, "Success", f"Model exported to {file_path}")
             except Exception as e:
@@ -715,7 +763,7 @@ class ResultsTab(QWidget):
             QMessageBox.critical(self, "Error", "Cannot access data manager. Please load data first.")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = _safe_get_parent_attr(self, 'data_tab').get_data_manager()
         if not data_manager or not data_manager._target_column:
             QMessageBox.critical(self, "Error", "No data loaded. Please load and prepare data first.")
             return
@@ -726,13 +774,13 @@ class ResultsTab(QWidget):
         
         # 1. Check trained models
         if self.parent and hasattr(self.parent, 'training_tab'):
-            trainer = self.parent.training_tab.get_trainer()
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             if model_name in trainer.results:
                 model_result = trainer.results[model_name]
         
         # 2. Check optimized models (remove " (Optimized)" suffix)
         if model_result is None and " (Optimized)" in model_name:
-            opt_tab = self.parent.optimization_tab
+            opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
             if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                 base_name = model_name.replace(" (Optimized)", "")
                 for opt_name, opt_result in opt_tab.optimization_results:
@@ -743,7 +791,7 @@ class ResultsTab(QWidget):
         
         # 3. Check neural networks
         if model_result is None:
-            nn_tab = self.parent.nn_tab
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
             if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                 for nn_name, nn_result in nn_tab.nn_training_results:
                     if nn_name == model_name:
@@ -762,7 +810,7 @@ class ResultsTab(QWidget):
         
         # 4. Check ensemble models
         if model_result is None and hasattr(self.parent, 'ensemble_tab'):
-            ens_tab = self.parent.ensemble_tab
+            ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
             if hasattr(ens_tab, 'get_ensemble_trainer'):
                 ens_trainer = ens_tab.get_ensemble_trainer()
                 if ens_trainer and hasattr(ens_trainer, 'results') and ens_trainer.results:
@@ -880,7 +928,7 @@ if __name__ == "__main__":
     def _generate_html_report(self):
         """Generate HTML report."""
         if self.parent and hasattr(self.parent, 'training_tab'):
-            trainer = self.parent.training_tab.get_trainer()
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             
             # Generate simple HTML report
             html = """
@@ -967,8 +1015,8 @@ if __name__ == "__main__":
             return
         
         try:
-            trainer = self.parent.training_tab.get_trainer()
-            data_manager = self.parent.data_tab.get_data_manager()
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
+            data_manager = _safe_get_parent_attr(self, 'data_tab').get_data_manager()
             
             # Get the model - check all possible sources
             # IMPORTANT: Check special types (NN, Ensemble) FIRST before trainer.results
@@ -989,7 +1037,7 @@ if __name__ == "__main__":
             
             # 3. Check optimized models
             elif "(Optimized)" in model_name:
-                opt_tab = self.parent.optimization_tab
+                opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
                 if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                     for opt_name, opt_result in opt_tab.optimization_results:
                         if f"{opt_name} (Optimized)" == model_name:
@@ -1085,7 +1133,7 @@ if __name__ == "__main__":
         """
         try:
             # Find the neural network result
-            nn_tab = self.parent.nn_tab
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
             nn_result = None
             source = ""
             
@@ -1218,7 +1266,7 @@ if __name__ == "__main__":
         """
         try:
             # Find the ensemble result
-            trainer = self.parent.training_tab.get_trainer()
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             ens_result = None
             
             if model_name in trainer.results:
@@ -1231,7 +1279,7 @@ if __name__ == "__main__":
                     ens_result = result
             
             if ens_result is None and hasattr(self.parent, 'ensemble_tab'):
-                ens_tab = self.parent.ensemble_tab
+                ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
                 if hasattr(ens_tab, 'get_ensemble_trainer') and ens_tab.get_ensemble_trainer():
                     ens_trainer = ens_tab.get_ensemble_trainer()
                     if hasattr(ens_trainer, 'results'):

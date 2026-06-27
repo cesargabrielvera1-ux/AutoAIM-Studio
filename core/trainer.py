@@ -87,8 +87,15 @@ class ModelTrainer(LoggerMixin):
         if progress_callback:
             progress_callback(f"Running cross-validation...", 0.4)
         
-        self.logger.info(f"Starting training for {unique_model_name} with {X_train.shape[0]} samples, {X_train.shape[1]} features")
-        cv_metrics = self._cross_validate(model, X_train, y_train, problem_type, cv_folds)
+        # v1.3.0 FIX: Extract random_state from model for reproducible CV
+        model_rs = 42
+        try:
+            model_rs = model.get_params().get('random_state', 42)
+        except Exception:
+            pass
+        
+        self.logger.info(f"Starting training for {unique_model_name} with {X_train.shape[0]} samples, {X_train.shape[1]} features, model_rs={model_rs}")
+        cv_metrics = self._cross_validate(model, X_train, y_train, problem_type, cv_folds, random_state=model_rs)
         self.logger.info(f"CV metrics for {unique_model_name}: {cv_metrics}")
         
         if progress_callback:
@@ -181,7 +188,9 @@ class ModelTrainer(LoggerMixin):
             if progress_callback:
                 progress_callback(f"Running {cv_folds}-fold CV...", 0.92)
             try:
-                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+                # v1.3.0 FIX: Use model's random_seed for reproducible CV folds
+                nn_rs = getattr(nn_builder._training_config, 'random_seed', 42)
+                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=nn_rs)
                 fold_scores = []
                 train_scores = []
                 
@@ -290,17 +299,25 @@ class ModelTrainer(LoggerMixin):
         X: np.ndarray,
         y: np.ndarray,
         problem_type: str,
-        cv_folds: int
+        cv_folds: int,
+        random_state: int = 42
     ) -> Dict[str, List[float]]:
-        """Perform cross-validation."""
+        """Perform cross-validation with explicit KFold for reproducible random_state."""
         scoring = 'r2' if problem_type == 'regression' else 'accuracy'
         
         try:
-            self.logger.info(f"Starting CV with {cv_folds} folds, scoring={scoring}, X.shape={X.shape}")
+            self.logger.info(f"Starting CV with {cv_folds} folds, scoring={scoring}, "
+                           f"random_state={random_state}, X.shape={X.shape}")
+            
+            # v1.3.0 FIX: Create explicit KFold with the model's random_state
+            # instead of passing an integer to cross_validate (which creates
+            # a non-shuffled KFold without random_state control).
+            from sklearn.model_selection import KFold
+            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
             
             cv_results = cross_validate(
                 model, X, y,
-                cv=cv_folds,
+                cv=kf,
                 scoring=scoring,
                 return_train_score=True,
                 n_jobs=1

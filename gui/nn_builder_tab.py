@@ -1,5 +1,6 @@
 """Neural Network Builder tab."""
 
+import logging
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -12,6 +13,27 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from ..core.nn_builder import NeuralNetworkBuilder, ActivationFunction
 from ..core.optimizer import HyperparameterOptimizer
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_get_parent_attr(widget, attr_path, default=None):
+    """Safely get a nested attribute from widget.parent."""
+    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+        return default
+    parts = attr_path.split('.')
+    obj = widget.parent
+    try:
+        for part in parts:
+            if part.endswith('()'):
+                obj = getattr(obj, part[:-2])()
+            else:
+                if not hasattr(obj, part):
+                    return default
+                obj = getattr(obj, part)
+        return obj
+    except Exception:
+        return default
 
 
 class NNTrainingThread(QThread):
@@ -250,6 +272,7 @@ class NNBuilderTab(QWidget):
         # Optimization
         self.nn_optimizer = HyperparameterOptimizer()
         self.nn_custom_param_ranges = {}
+        self.nn_selected_opt_params = {}  # v1.4.0: param_name -> bool
         self.nn_cv_folds = 5
         self.last_nn_opt_result = None  # Store last optimization result
         self._best_params_applied = False  # v1.3.0: True after Apply Best + before Train
@@ -548,19 +571,31 @@ class NNBuilderTab(QWidget):
         self.opt_random_seed_spin.setToolTip("Random seed for reproducible NN optimization")
         opt_layout.addWidget(self.opt_random_seed_spin, 3, 1, 1, 3)
         
-        # Row 4: Edit + Reset buttons side by side
+        # v1.4.0: Compact 3-button toolbar in 1 row (was 2 rows)
+        btn_style = "QPushButton{padding:3px 6px;font-size:8pt;}"
+        
+        self.select_nn_params_btn = QPushButton("Select Params")
+        self.select_nn_params_btn.setStyleSheet(btn_style)
+        self.select_nn_params_btn.setToolTip("Choose which parameters to optimize")
+        self.select_nn_params_btn.clicked.connect(self._select_nn_opt_params)
+        opt_layout.addWidget(self.select_nn_params_btn, 4, 0)
+        
         self.edit_nn_ranges_btn = QPushButton("Edit Ranges")
+        self.edit_nn_ranges_btn.setStyleSheet(btn_style)
         self.edit_nn_ranges_btn.clicked.connect(self._edit_nn_parameter_ranges)
-        opt_layout.addWidget(self.edit_nn_ranges_btn, 4, 0, 1, 2)
+        opt_layout.addWidget(self.edit_nn_ranges_btn, 4, 1)
         
         self.reset_nn_ranges_btn = QPushButton("Reset")
+        self.reset_nn_ranges_btn.setStyleSheet(btn_style)
         self.reset_nn_ranges_btn.clicked.connect(self._reset_nn_parameter_ranges)
         self.reset_nn_ranges_btn.setEnabled(False)
-        opt_layout.addWidget(self.reset_nn_ranges_btn, 4, 2, 1, 2)
+        opt_layout.addWidget(self.reset_nn_ranges_btn, 4, 2)
         
-        # Row 5: Status label
-        self.nn_ranges_label = QLabel("Using default ranges")
-        opt_layout.addWidget(self.nn_ranges_label, 5, 0, 1, 4)
+        # Status label (compact, replaces the separate 'nn_selected_label')
+        self.nn_ranges_label = QLabel("Default")
+        self.nn_ranges_label.setStyleSheet("color: #888888; font-size: 7pt;")
+        self.nn_ranges_label.setToolTip("Current parameter range status")
+        opt_layout.addWidget(self.nn_ranges_label, 4, 3)
         
         left_layout.addWidget(opt_group)
         
@@ -641,59 +676,47 @@ class NNBuilderTab(QWidget):
         
         left_layout.addWidget(presets_group)
         
-        left_layout.addStretch()
         splitter.addWidget(left_widget)
         
-        # Right panel - Results
+        # v1.4.0: Right panel — compact 4-panel layout with limited heights
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(4, 4, 4, 4)
         
-        # Training progress
-        progress_group = QGroupBox("Training Progress")
-        progress_layout = QVBoxLayout(progress_group)
+        # Create right-panel widgets if not already created
+        if not hasattr(self, 'progress_text'):
+            self.progress_text = QTextEdit()
+            self.progress_text.setReadOnly(True)
+        if not hasattr(self, 'architecture_text'):
+            self.architecture_text = QTextEdit()
+            self.architecture_text.setReadOnly(True)
+        if not hasattr(self, 'results_table'):
+            self.results_table = QTableWidget()
+            self.results_table.setColumnCount(6)
+            self.results_table.setHorizontalHeaderLabels([
+                "Epoch", "Train Loss", "Val Loss", "Train Metric", "Val Metric", "Time"
+            ])
+        if not hasattr(self, 'model_info_text'):
+            self.model_info_text = QTextEdit()
+            self.model_info_text.setReadOnly(True)
         
-        self.progress_text = QTextEdit()
-        self.progress_text.setReadOnly(True)
-        self.progress_text.setMaximumHeight(100)
-        progress_layout.addWidget(self.progress_text)
-        
-        right_layout.addWidget(progress_group)
-        
-        # Architecture preview
-        preview_group = QGroupBox("Architecture Preview")
-        preview_layout = QVBoxLayout(preview_group)
-        
-        self.architecture_text = QTextEdit()
-        self.architecture_text.setReadOnly(True)
-        preview_layout.addWidget(self.architecture_text)
-        
-        right_layout.addWidget(preview_group)
-        
-        # Results table
-        results_group = QGroupBox("Training Results")
-        results_layout = QVBoxLayout(results_group)
-        
-        self.results_table = QTableWidget()
-        self.results_table.setColumnCount(6)
-        self.results_table.setHorizontalHeaderLabels([
-            "Epoch", "Train Loss", "Val Loss", "Train Metric", "Val Metric", "Time (s)"
-        ])
-        results_layout.addWidget(self.results_table)
-        
-        right_layout.addWidget(results_group)
-        
-        # Model info
-        info_group = QGroupBox("Model Information")
-        info_layout = QVBoxLayout(info_group)
-        
-        self.model_info_text = QTextEdit()
-        self.model_info_text.setReadOnly(True)
-        info_layout.addWidget(self.model_info_text)
-        
-        right_layout.addWidget(info_group)
+        for grp_name, widget_name, max_h in [
+            ("Training Progress", "progress_text", 80),
+            ("Architecture Preview", "architecture_text", 80),
+            ("Training Results", "results_table", 140),
+            ("Model Information", "model_info_text", 80),
+        ]:
+            grp = QGroupBox(grp_name)
+            vl = QVBoxLayout(grp)
+            vl.setContentsMargins(3, 3, 3, 3)
+            w = getattr(self, widget_name)
+            w.setMaximumHeight(max_h)
+            vl.addWidget(w)
+            right_layout.addWidget(grp)
         
         splitter.addWidget(right_widget)
-        splitter.setSizes([400, 600])
+        splitter.setSizes([520, 480])  # More space for left panel
         layout.addWidget(splitter)
     
     def _load_preset(self, preset):
@@ -768,6 +791,72 @@ class NNBuilderTab(QWidget):
         
         self.architecture_text.setPlainText(preview)
     
+    def _select_nn_opt_params(self):
+        """v1.4.0: Open dialog to select which NN parameters to optimize."""
+        # Default NN parameters and their descriptions
+        nn_params = {
+            'n_layers': "Number of hidden layers (1-5). High impact on capacity.",
+            'n_units': "Neurons per layer (16-512). High impact on expressiveness.",
+            'dropout': "Dropout rate (0.0-0.5). High impact on overfitting prevention.",
+            'activation': "Activation function. Medium impact.",
+            'batch_norm': "Use batch normalization. Low-medium impact.",
+            'learning_rate': "Learning rate (1e-5 to 1e-2). High impact on convergence.",
+            'batch_size': "Batch size (16, 32, 64, 128). Medium impact.",
+            'weight_decay': "Weight decay / L2 regularization. Medium impact.",
+            'optimizer': "Optimizer (adam, adamw). Low-medium impact.",
+            'gradient_clip_val': "Gradient clipping (0.0-5.0). Medium impact on stability.",
+        }
+        
+        # Recommended (high-impact) subset
+        recommended = {'n_layers', 'n_units', 'dropout', 'learning_rate', 'batch_size'}
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select NN Parameters to Optimize")
+        dialog.setMinimumWidth(420)
+        dialog.setMinimumHeight(350)
+        layout = QVBoxLayout(dialog)
+        
+        info = QLabel("Checked parameters will be optimized. Unchecked use defaults.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        for label, slot in [("Select All", lambda: [cb.setChecked(True) for cb in cbs.values()]),
+                            ("Recommended", lambda: [cb.setChecked(n in recommended) for n, cb in cbs.items()]),
+                            ("Clear All", lambda: [cb.setChecked(False) for cb in cbs.values()])]:
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            btn_layout.addWidget(b)
+        layout.addLayout(btn_layout)
+        
+        # Checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        sw = QWidget()
+        sl = QVBoxLayout(sw)
+        cbs = {}
+        for name, tooltip in nn_params.items():
+            cb = QCheckBox(name)
+            cb.setChecked(self.nn_selected_opt_params.get(name, True))
+            cb.setToolTip(tooltip)
+            sl.addWidget(cb)
+            cbs[name] = cb
+        sl.addStretch()
+        scroll.setWidget(sw)
+        layout.addWidget(scroll)
+        
+        # OK/Cancel
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+        layout.addWidget(btns)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.nn_selected_opt_params = {n: cb.isChecked() for n, cb in cbs.items()}
+            n_chk = sum(self.nn_selected_opt_params.values())
+            self.nn_ranges_label.setText(f"{n_chk}/{len(nn_params)} params")
+    
     def _edit_nn_parameter_ranges(self):
         """Open dialog to edit NN optimization parameter ranges."""
         if not self.nn_custom_param_ranges:
@@ -800,7 +889,7 @@ class NNBuilderTab(QWidget):
     
     def _optimize_hyperparameters(self):
         """Optimize neural network hyperparameters."""
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
             return
@@ -817,9 +906,33 @@ class NNBuilderTab(QWidget):
         
         # Get custom or default parameter ranges
         if self.nn_custom_param_ranges:
-            param_ranges = self.nn_custom_param_ranges
+            param_ranges = dict(self.nn_custom_param_ranges)
         else:
-            param_ranges = None  # Will use defaults in optimizer
+            # Default NN parameter ranges
+            param_ranges = {
+                'n_layers': (1, 5, 'int'),
+                'n_units': (16, 512, 'int_log'),
+                'dropout': (0.0, 0.5, 'float'),
+                'activation': (['relu', 'leaky_relu', 'tanh', 'gelu'], None, 'categorical'),
+                'batch_norm': ([True, False], None, 'categorical'),
+                'learning_rate': (1e-5, 1e-2, 'float_log'),
+                'batch_size': ([16, 32, 64, 128], None, 'categorical'),
+                'weight_decay': (1e-6, 1e-3, 'float_log'),
+                'optimizer': (['adam', 'adamw'], None, 'categorical'),
+                'gradient_clip_val': (0.0, 5.0, 'float'),
+            }
+        
+        # v1.4.0: Filter to only selected parameters
+        if self.nn_selected_opt_params:
+            param_ranges = {
+                k: v for k, v in param_ranges.items()
+                if self.nn_selected_opt_params.get(k, True)
+            }
+            if not param_ranges:
+                QMessageBox.warning(self, "Warning",
+                    "No parameters selected for optimization. "
+                    "Please use 'Select Parameters' to choose at least one.")
+                return
         
         n_trials = self.opt_trials_spin.value()
         cv_folds = self.opt_cv_folds_spin.value()
@@ -1004,7 +1117,7 @@ class NNBuilderTab(QWidget):
 
     def _train_network(self):
         """Train the neural network."""
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
             return
@@ -1039,7 +1152,8 @@ class NNBuilderTab(QWidget):
             weight_decay=self.weight_decay_spin.value(),
             early_stopping_patience=self.patience_spin.value(),
             early_stopping_min_delta=self.min_delta_spin.value(),
-            gradient_clip_val=self.grad_clip_spin.value() if self.grad_clip_spin.value() > 0 else 0.0
+            gradient_clip_val=self.grad_clip_spin.value() if self.grad_clip_spin.value() > 0 else 0.0,
+            random_seed=self.random_seed_spin.value()
         )
         
         # Store CV folds for use in trainer
@@ -1081,8 +1195,8 @@ class NNBuilderTab(QWidget):
         # Get cv_folds for training
         cv_folds = getattr(self, 'nn_cv_folds', self.cv_folds_spin.value())
         
-        data_manager = self.parent.data_tab.get_data_manager()
-        trainer = self.parent.training_tab.get_trainer()
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
+        trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
         
         # Get data (use external validation set if loaded)
         use_val = data_manager.validation_data is not None
@@ -1125,7 +1239,33 @@ class NNBuilderTab(QWidget):
         QMessageBox.critical(self, "Error", f"Training failed:\n{error_msg}")
     
     def _display_results(self, result):
-        """Display training results."""
+        """Display training results in both the table and model info text."""
+        # v1.4.0 FIX: Populate the Training Results table with epoch-by-epoch data
+        history = result.nn_history or {}
+        train_losses = history.get('train_loss', [])
+        val_losses = history.get('val_loss', [])
+        train_metrics = history.get('train_metric', [])
+        val_metrics = history.get('val_metric', [])
+        epoch_times = history.get('epoch_time', [])
+        
+        n_epochs = max(len(train_losses), len(val_losses))
+        self.results_table.setRowCount(n_epochs)
+        
+        for epoch in range(n_epochs):
+            self.results_table.setItem(epoch, 0, 
+                QTableWidgetItem(str(epoch + 1)))
+            self.results_table.setItem(epoch, 1,
+                QTableWidgetItem(f"{train_losses[epoch]:.6f}" if epoch < len(train_losses) else "N/A"))
+            self.results_table.setItem(epoch, 2,
+                QTableWidgetItem(f"{val_losses[epoch]:.6f}" if epoch < len(val_losses) else "N/A"))
+            self.results_table.setItem(epoch, 3,
+                QTableWidgetItem(f"{train_metrics[epoch]:.6f}" if epoch < len(train_metrics) else "N/A"))
+            self.results_table.setItem(epoch, 4,
+                QTableWidgetItem(f"{val_metrics[epoch]:.6f}" if epoch < len(val_metrics) else "N/A"))
+            self.results_table.setItem(epoch, 5,
+                QTableWidgetItem(f"{epoch_times[epoch]:.2f}" if epoch < len(epoch_times) else "N/A"))
+        
+        # Model Information text
         info = f"Training Time: {result.training_time:.2f}s\n"
         
         if result.metrics:
@@ -1139,11 +1279,10 @@ class NNBuilderTab(QWidget):
             info += f"CV Scores: {[f'{s:.4f}' for s in cv_scores]}\n"
         
         if result.nn_history:
-            epochs = len(result.nn_history.get('train_loss', []))
-            info += f"\nEpochs: {epochs}\n"
-            if result.nn_history.get('train_loss'):
-                info += f"Final Train Loss: {result.nn_history['train_loss'][-1]:.4f}\n"
-            if result.nn_history.get('val_loss'):
-                info += f"Final Val Loss: {result.nn_history['val_loss'][-1]:.4f}\n"
+            info += f"\nEpochs: {n_epochs}\n"
+            if train_losses:
+                info += f"Final Train Loss: {train_losses[-1]:.4f}\n"
+            if val_losses:
+                info += f"Final Val Loss: {val_losses[-1]:.4f}\n"
         
         self.model_info_text.setPlainText(info)
