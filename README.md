@@ -1,23 +1,23 @@
-# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio v1.3.0
+# AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio v1.4.0
 
-**AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, crystal structure analysis, neural network design, hyperparameter optimization, and standalone model deployment.
+**AutoAIM Studio** is a standalone desktop application for automated machine learning in materials science and beyond. It provides a complete no-code AutoML pipeline with custom compositional feature engineering, crystal structure analysis, neural network design, hyperparameter optimization, manual parameter configuration, parameter selection for optimization, and standalone model deployment.
 
 > **Auto Aim to predictions in minutes, not days.**
 
 ---
 
-## What's New in v1.3.0
+## What's New in v1.4.0
 
-- **Train with Custom Parameters** — Manually configure all hyperparameters for 7 regressors (RF, GB, XGBoost, LightGBM, CatBoost, SVR, Ridge) including XGB min_child_weight/gamma, SVR kernel selection, RF max_features. All configurable params are also included in Bayesian optimization
-- **Manual Ensemble Weights** — Set custom weights for each model in a weighted-average ensemble instead of relying on Bayesian optimization
-- **53 Educational Tooltips** — Hover over any parameter to see what it does, when to change it, and typical values. Covers all Training, Optimization, NN, and Ensemble parameters
-- **Cross-Validation Fold Breakdown** — Model Details dialog now shows per-fold CV scores as a table for all model types (regressors, ensembles, NNs)
-- **NN Scheduler + Min Delta + Grad Clip** — Full control over learning rate scheduling, early stopping sensitivity, and gradient clipping in the NN Training Config panel
-- **Tab Reorder** — Logical workflow: Data → Training → Optimization → Ensemble → Neural Network → Results → Explainability → Predict
-- **GPU Model Bundle Fix** — Models trained on GPU can now be saved and loaded correctly; CPU-only executables remain unaffected
+- **Select Parameters to Optimize** — Choose which hyperparameters Optuna optimizes. "Recommended" mode selects only high-impact parameters for faster CPU optimization. Available for regressors and neural networks
+- **Random State Sensitivity Testing** — Changing the random seed in Custom Parameters now produces genuinely different results (train/test split and CV folds both respond to the seed)
+- **High-Precision Parameter Input** — 10-12 decimal places for fine-grained sensitivity testing
+- **LightGBM min_child_samples** — Complete parameter coverage: 9 tunable parameters, matching XGBoost
+- **NN Tab Redesign** — Compact toolbar, limited-height panels, epoch-by-epoch Training Results table
+- **Bug Fixes** — Ensemble deduplication, safe parent access, parameter sync between optimizer and registry, manual model deletion
 
 ## Previous Highlights
 
+- **v1.3.0** — Train with Custom Parameters (7 regressors, all params), 53 tooltips, CV fold breakdown, NN scheduler/grad clip, tab reorder, GPU bundle fix
 - **v1.2.0** — Crystal Structure Support (CIF, POSCAR, XYZ), SVR & KNN optimization fix, PyInstaller packaging fix
 - **v1.1.0** — Initial release with AutoML training, neural networks, Bayesian optimization, ensembles, and model deployment
 
@@ -43,6 +43,7 @@
 | **Ensemble Weight Optimization** | Bayesian optimization of ensemble member weights via Optuna |
 | **Cross-Validation for All Models** | Configurable K-fold CV for regressors, neural networks, and ensembles |
 | **Educational Tooltips** | 53 tooltips explaining every parameter across all configuration tabs |
+
 
 ---
 
@@ -194,33 +195,41 @@ The same interface you love remains untouched with same funcionality.
 Train one or all regressors with Default parameters or click "Train with Custom Parameters" button to manually configure them.
 
 ## Train with Custom Parameters Pop up Tab
-<img width="1279" height="763" alt="Captura de pantalla 2026-06-25 115739" src="https://github.com/user-attachments/assets/6a496fc7-2874-4830-abb3-355cc0a09073" />
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-26 200125" src="https://github.com/user-attachments/assets/c80650d9-8ed9-47f0-8f8c-fc9bfacac2f4" />
 Manually select training parameters for every regressor you want to train. Configure CV Folds and Random State.
 
 ## Regressors Optimization Tab
-<img width="1279" height="764" alt="Captura 3" src="https://github.com/user-attachments/assets/c31d265a-2a6e-488a-8c7e-0ec65111cbf9" />
-Optimize any regressor. Configure number of trails, Random State, CV Folds and Parameter Optimization Ranges.
+<img width="1279" height="764" alt="Captura de pantalla 2026-06-26 200223" src="https://github.com/user-attachments/assets/2869ddf2-3b9c-45ae-a476-b90ee80a9743" />
+Optimize any regressor. Configure number of trails, Random State, CV Folds and Parameter Optimization Ranges. You can also select which parameters you want to optimize.
+
+## Parameter selection and optimization ranges
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-26 200517" src="https://github.com/user-attachments/assets/d5ff07cb-5605-46df-8130-e20b20ee7a32" />
+Select all or just a few parameters to optimize if you want to cut optimization time.
+
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-26 200538" src="https://github.com/user-attachments/assets/5067e0e1-fa00-4da6-a11d-26a46de751e3" />
+Edit optimization ranges. All parameters for all regressors are available.
 
 ## Rgressors Optimization Tab Optimization Details
-<img width="1279" height="763" alt="Captura4" src="https://github.com/user-attachments/assets/f8e9beba-8bae-4313-b1b5-5ba8d1e7695a" />
+<img width="1279" height="764" alt="Captura de pantalla 2026-06-26 200738" src="https://github.com/user-attachments/assets/b8a5d47c-08e3-40ea-bc8e-ea6d1aba43a0" />
 Optimization details are shown on the right. TOptimization progress, Optimization Results and Best Trail Details.
 
 ## Ensemble Tab
 <img width="1279" height="764" alt="Ensamble" src="https://github.com/user-attachments/assets/75f7a0f3-7b10-41b3-9e14-2c08993de563" />
 Train custom Ensemble models. You can choose either Optimizer weights or try with custom weights.
 
-
 ## Neural Network Training and Optimization Tab
-<img width="1279" height="763" alt="NN-Tab1" src="https://github.com/user-attachments/assets/26e7669a-d6c2-418a-b653-6380eed49c10" />
-Completely redesigned Neural Network Tab! Build a custom Neural Network and train it, or select optimization ranges and optimize! Apply best hyperparameters and retrain. You can see results in real time.
+<img width="1279" height="766" alt="Captura de pantalla 2026-06-26 200819" src="https://github.com/user-attachments/assets/bcc13eca-d2f8-42ed-a552-10f482e89eda" />
+Completely redesigned Neural Network Tab! Build a custom Neural Network and train it, or select optimization ranges and optimize! As for regressors, you can now choose which parameters you want to optimize. Apply best hyperparameters and retrain. You can see results in real time.
 
+## Neural Network Custom Optimization Ranges and parameter selection for optimization
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-26 201021" src="https://github.com/user-attachments/assets/d74e74aa-5644-44ea-a302-a54f0744a364" />
+Select parameters for optimization.
 
-## Neural Network Custom Optimization Ranges
 <img width="1279" height="762" alt="NN-2" src="https://github.com/user-attachments/assets/f5f6aff0-d631-44a9-a2c3-5d84c4b8524d" />
-As for all regressors, you can now set optimization ranges prior optimizing your NN.
+Set optimization ranges and Optimize!
 
 ## Neural Network Optimization and Training Progress
-<img width="1279" height="763" alt="NN-3" src="https://github.com/user-attachments/assets/ff17118d-bc75-4a2f-99d3-8d9c0c707df4" />
+<img width="1279" height="763" alt="Captura de pantalla 2026-06-26 201331" src="https://github.com/user-attachments/assets/b562af5f-5a96-4426-887a-060ec385e324" />
 Watch results in real time as NN Train or Optimize.
 
 ## Results Tab
@@ -292,7 +301,7 @@ If you use AutoAIM Studio in your research, please cite:
   title = {AutoAIM-Studio: Auto Artificial Intelligence for Materials Studio},
   year = {2026},
   url = {https://github.com/cesargabrielvera1-ux/AutoAIM-Studio},
-  doi = {10.5281/zenodo.20837713}
+  doi = {10.5281/zenodo.20947495}
 }
 ```
 
