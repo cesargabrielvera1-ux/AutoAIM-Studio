@@ -8,8 +8,8 @@ authors:
     orcid: "https://orcid.org/0000-0003-2367-3534"; "https://orcid.org/0000-0002-7068-7579"
     affiliation: "National Autonomous University of Mexico. Materials Research Institute."
 repository-code: "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio"
-version: 1.3.0
-date-released: 2026-06-25
+version: 1.4.0
+date-released: 2026-06-26
 keywords:
   - machine learning
   - materials science
@@ -32,4 +32,4 @@ preferred-citation:
   volume: 0
   issue: 0
   pages: 0
-  doi: 10.5281/zenodo.20837713
+  doi: 10.5281/zenodo.20947495
