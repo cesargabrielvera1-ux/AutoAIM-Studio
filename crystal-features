@@ -1,0 +1,76 @@
+# AutoAIM Studio v2.0 — Crystal Structure Features (CIF Loading)
+
+> \\\\\\\*\\\\\\\*Note\\\\\\\*\\\\\\\*: This table lists all 149 features extracted when loading CIF files directly via "Load Crystal Structures". Features are organized by category. For linked structures (via ID column), see Crystal Feature Extractor documentation.
+
+|Category|Feature Name|Definition|
+|-|-|-|
+|**Lattice**|`lattice\\\\\\\_a`|Lattice parameter a (Å)|
+|**Lattice**|`lattice\\\\\\\_b`|Lattice parameter b (Å)|
+|**Lattice**|`lattice\\\\\\\_c`|Lattice parameter c (Å)|
+|**Lattice**|`lattice\\\\\\\_alpha`|Lattice angle α (°)|
+|**Lattice**|`lattice\\\\\\\_beta`|Lattice angle β (°)|
+|**Lattice**|`lattice\\\\\\\_gamma`|Lattice angle γ (°)|
+|**Lattice**|`lattice\\\\\\\_volume`|Unit cell volume V (Å³)|
+|**Lattice**|`lattice\\\\\\\_abc\\\\\\\_ratio`|Mean lattice parameter over maximum: \[(a+b+c)/3] / max(a,b,c)|
+|**Lattice**|`lattice\\\\\\\_is\\\\\\\_cubic`|Binary flag (1.0 if cubic within tolerance, else 0.0)|
+|**Lattice**|`lattice\\\\\\\_is\\\\\\\_hexagonal`|Binary flag (1.0 if hexagonal within tolerance, else 0.0)|
+|**Lattice**|`lattice\\\\\\\_anisotropy`|Lattice shape anisotropy: std(a,b,c) / mean(a,b,c)|
+||||
+|**Composition**|`n\\\\\\\_sites`|Number of atomic sites in the unit cell|
+|**Composition**|`n\\\\\\\_elements`|Number of unique chemical elements|
+|**Composition**|`avg\\\\\\\_atomic\\\\\\\_number`|Weighted mean atomic number: Σ(Z\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_atomic\\\\\\\_mass`|Weighted mean atomic mass: Σ(mass\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_electronegativity`|Weighted mean Pauling electronegativity: Σ(X\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_ionization\\\\\\\_energy`|Weighted mean ionization energy: Σ(IE\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_electron\\\\\\\_affinity`|Weighted mean electron affinity: Σ(EA\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_covalent\\\\\\\_radius`|Weighted mean covalent radius: Σ(r\_cov\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_atomic\\\\\\\_radius`|Weighted mean atomic radius: Σ(r\_atom\_i × f\_i)|
+|**Composition**|`avg\\\\\\\_density`|Weighted mean elemental density: Σ(ρ\_i × f\_i)|
+|**Composition**|`electronegativity\\\\\\\_variance`|Variance of Pauling electronegativity across elements (unweighted)|
+|**Composition**|`radius\\\\\\\_variance`|Variance of atomic radii across elements (unweighted)|
+|**Composition**|`mass\\\\\\\_variance`|Variance of atomic masses across elements (unweighted)|
+||||
+|**Structural**|`volume\\\\\\\_per\\\\\\\_atom`|Unit cell volume per atom: V\_cell / n\_sites (Å³/atom)|
+|**Structural**|`packing\\\\\\\_fraction`|Estimated packing fraction: Σ(V\_sphere\_i) / V\_cell using covalent radii|
+|**Structural**|`spacegroup\\\\\\\_number`|Space group number (1–230) from SpacegroupAnalyzer|
+||||
+|**Derived**|`density`|Crystal density (g/cm³) from pymatgen Structure|
+|**Derived**|`total\\\\\\\_electrons`|Total number of electrons in the unit cell composition|
+||||
+|**Advanced Structural**|`mean\\\\\\\_bond\\\\\\\_length`|Mean nearest-neighbor distance (Å) from CrystalNN or distance cutoff|
+|**Advanced Structural**|`std\\\\\\\_bond\\\\\\\_length`|Standard deviation of bond lengths (Å)|
+|**Advanced Structural**|`min\\\\\\\_bond\\\\\\\_length`|Minimum nearest-neighbor distance (Å)|
+|**Advanced Structural**|`max\\\\\\\_bond\\\\\\\_length`|Maximum nearest-neighbor distance (Å)|
+|**Advanced Structural**|`mean\\\\\\\_coordination\\\\\\\_number`|Mean coordination number from CrystalNN or distance-based neighbors|
+|**Advanced Structural**|`max\\\\\\\_coordination\\\\\\\_number`|Maximum coordination number observed in the structure|
+|**Advanced Structural**|`n\\\\\\\_bonds\\\\\\\_per\\\\\\\_atom`|Total bonds counted divided by number of atoms|
+|**Advanced Structural**|`rdf\\\\\\\_peak\\\\\\\_1`|Position of 1st peak in radial distribution function (Å)|
+|**Advanced Structural**|`rdf\\\\\\\_peak\\\\\\\_2`|Position of 2nd peak in radial distribution function (Å)|
+|**Advanced Structural**|`rdf\\\\\\\_peak\\\\\\\_3`|Position of 3rd peak in radial distribution function (Å)|
+|**Advanced Structural**|`rdf\\\\\\\_peak\\\\\\\_height\\\\\\\_1`|Height (count) of 1st RDF peak|
+|**Advanced Structural**|`rdf\\\\\\\_peak\\\\\\\_height\\\\\\\_2`|Height (count) of 2nd RDF peak|
+|**Advanced Structural**|`structure\\\\\\\_complexity\\\\\\\_index`|Complexity proxy: n\_elements × ln(1 + n\_sites)|
+|**Advanced Structural**|`lattice\\\\\\\_anisotropy`|Lattice shape anisotropy: std(a,b,c) / mean(a,b,c)|
+|**Advanced Structural**|`surface\\\\\\\_area\\\\\\\_estimate`|Estimated surface area from lattice parameters: 2(ab + bc + ac) (Å²)|
+|**Magpie Composition (106 features)**|`magpie\\\\\\\_001` ... `magpie\\\\\\\_106`|Composition descriptors (mean, std, min, max, range): AtomicNumber, MeltingT,|
+|Column, Row, NsValence, NpValence, NdValence, NfValence, NValence, NsUnfilled, NpUnfilled,|||
+|NdUnfilled, NfUnfilled, NUnfilled, GSbandgap, GSmagmom, SpaceGroupNumber, etc. (106 total)|||
+
+**Total Features: 150**
+
+\---
+
+## Feature Categories Summary
+
+|Category|Count|Description|
+|-|-|-|
+|Lattice|11|Unit cell parameters, angles, volume, symmetry flags|
+|Composition|13|Elemental statistics, weighted averages, variances|
+|Structural|3|Per-atom volume, packing fraction, space group|
+|Derived|2|Calculated properties (density, electron count)|
+|Advanced Structural|15|Bond lengths, coordination numbers, RDF peaks, complexity|
+|Magpie Composition|106|106 elemental property statistics from Magpie|
+|**TOTAL**|**150**||
+
+
+
