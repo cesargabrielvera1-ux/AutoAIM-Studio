@@ -1,6 +1,6 @@
-# AutoAIM Studio v2.0 — Crystal Structure Features (CIF Loading)
+## AutoAIM Studio v1.4.0 — Crystal Structure Features (CIF Loading)
 
-> **Note**: This table lists all 149 features extracted when loading CIF files directly via "Load Crystal Structures". Features are organized by category. For linked structures (via ID column), see Crystal Feature Extractor documentation.
+> **Note**: This table lists all 149 features extracted when loading CIF files directly via "Load Crystal Structures". Features are organized by category. 
 
 | Category | Feature Name | Definition |
 |----------|-------------|------------|
