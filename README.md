@@ -658,7 +658,7 @@ Two scoping notes remain by design:
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.0.0** | **Sep 2026** | **Zero Data Leakage via sklearn Pipeline (CRITICAL FIX)**: preprocessor refitted inside each CV fold; entire stack migrated (Training, Optimization, Ensemble, NN); saved models are fitted Pipelines; GP Kernel Tuning (5 families, 4 hyperparameters); Session Report Cleanup; Optimization Tab GP integration; 60+ tooltips; 1024+ tests (0 failures, 75 skipped)** |
+| **v2.0.0** | **Oct 2026** | **Zero Data Leakage via sklearn Pipeline (CRITICAL FIX)**: preprocessor refitted inside each CV fold; entire stack migrated (Training, Optimization, Ensemble, NN); saved models are fitted Pipelines; GP Kernel Tuning (5 families, 4 hyperparameters); Session Report Cleanup; Optimization Tab GP integration; 60+ tooltips; 1024+ tests (0 failures, 75 skipped)** |
 | v1.4.0 | Jun 2026 | Published stable release — AutoML pipeline, NN builder, ensembles, deployment |
 | v1.3.0 | May 2026 | Train with Custom Parameters, 53 tooltips, CV fold breakdown, NN scheduler/grad clip |
 | v1.2.0 | May 2026 | Crystal Structure Support (CIF, POSCAR, XYZ), SVR/KNN fix, PyInstaller fix |

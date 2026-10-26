@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.0.0] - 2026-09-09 — Zero Data Leakage via sklearn Pipeline
+## [2.0.0] - 2026-10-26 — Zero Data Leakage via sklearn Pipeline
 
 ### Gaussian Process — Full Kernel Family Support
 
@@ -624,7 +624,7 @@ These fixes were validated against a comprehensive integration test suite that s
 
 ---
 
-## [2.0.0] - 2026-08-22 — JOSS-Level Audit & Test Completion
+## [2.0.0] - 2026-10-26 — JOSS-Level Audit & Test Completion
 
 ### Code Audit — 18 Bugs Found and Fixed
 An exhaustive line-by-line audit of all 35 source files (~15,000 LOC) was performed following Journal of Open Source Software (JOSS) review standards.
@@ -740,7 +740,7 @@ Three previously uncovered core modules now have full test coverage:
 
 | Version | Date       | Description                                                          |
 |---------|------------|----------------------------------------------------------------------|
-| **2.0.0** | **2026-09-09** | **Zero Data Leakage via sklearn Pipeline (CRITICAL FIX)**: preprocessor refitted inside each CV fold; entire stack migrated (Training, Optimization, Ensemble, NN); saved models are fitted Pipelines; GP Kernel Tuning (5 families, 4 hyperparameters); Session Report Cleanup; Optimization Tab GP integration; 1024+ tests (0 failures, 75 skipped)** |
+| **2.0.0** | **2026-10-26** | **Zero Data Leakage via sklearn Pipeline (CRITICAL FIX)**: preprocessor refitted inside each CV fold; entire stack migrated (Training, Optimization, Ensemble, NN); saved models are fitted Pipelines; GP Kernel Tuning (5 families, 4 hyperparameters); Session Report Cleanup; Optimization Tab GP integration; 1024+ tests (0 failures, 75 skipped)** |
 | 1.4.0   | 2026-06-27 | Select Parameters to Optimize, LightGBM coverage, random state fix   |
 | 1.3.0   | 2026-06-24 | Custom Parameters, manual ensemble weights, NN config expansion      |
 | 1.2.0   | 2026-06-14 | Crystal structure support, PyInstaller fix                           |
