@@ -196,17 +196,17 @@ class DynamicNN(nn.Module, LoggerMixin):
     
     def _validate_parameters(self) -> None:
         """Validate that the model has trainable parameters."""
-        # FIX: Verificar que el modelo tiene parametros entrenables
+        # FIX: Verify model has trainable parameters
         model_params = list(self.parameters())
         if len(model_params) == 0:
             raise ValueError(
-                "El modelo no tiene parametros entrenables. "
-                "Verifica que las capas se hayan agregado correctamente."
+                "The model has no trainable parameters. "
+                "Verify that layers were added correctly."
             )
         
-        # FIX: Verificar que output_layer tiene parametros
+        # FIX: Verify output_layer has parameters
         if self.output_layer is None:
-            raise ValueError("La capa de salida no fue inicializada.")
+            raise ValueError("The output layer was not initialized.")
         
         total_params = sum(p.numel() for p in model_params)
         self.logger.info(f"Model has {total_params:,} parameters")
@@ -294,8 +294,10 @@ class DynamicNN(nn.Module, LoggerMixin):
         self.eval()  # Set to evaluation mode
         
         # Convert to tensor
+        # v2.0 FIX: np.asarray() ensures DataFrames/Series are converted to numpy
+        # arrays before torch.FloatTensor, which cannot infer shape from pandas objects.
         if not isinstance(X, torch.Tensor):
-            X_tensor = torch.FloatTensor(X)
+            X_tensor = torch.FloatTensor(np.asarray(X))
         else:
             X_tensor = X
         
@@ -347,11 +349,18 @@ class DynamicNN(nn.Module, LoggerMixin):
 
 class NeuralNetworkBuilder(LoggerMixin):
     """Builder for creating and training neural networks."""
-    
+
     def __init__(self):
         """Initialize neural network builder."""
         self._hardware = get_hardware_detector()
         self._device = self._hardware.get_torch_device()
+        # v2.0: Limit PyTorch CPU threads to prevent oversubscription.
+        # When running on CPU, PyTorch uses OpenMP which defaults to all cores.
+        # We cap it at recommended_n_jobs to leave one core for the OS/GUI.
+        if str(self._device) == 'cpu':
+            import torch
+            torch.set_num_threads(self._hardware.info.recommended_n_jobs)
+            self.logger.info(f"PyTorch CPU threads set to {self._hardware.info.recommended_n_jobs}")
         self._model: Optional[DynamicNN] = None
         self._architecture: Optional[NNArchitecture] = None
         self._training_config: Optional[TrainingConfig] = None
@@ -422,18 +431,47 @@ class NeuralNetworkBuilder(LoggerMixin):
         
         return self._architecture
     
-    def build_model(self) -> DynamicNN:
+    def build_model(self, random_seed: Optional[int] = None) -> DynamicNN:
         """Build the neural network model.
-        
+
+        v2.0: Fijar torch.manual_seed() antes de la creación para garantizar
+        reproducibilidad de la inicialización de pesos. La semilla se toma de
+        (1) el parámetro random_seed, (2) el TrainingConfig existente, o
+        (3) el default 42.
+
+        Args:
+            random_seed: Semilla para torch/numpy/random. Si es None, se usa
+                la del TrainingConfig (si existe) o 42.
+
         Returns:
             Built model
         """
         if self._architecture is None:
             raise ValueError("Architecture must be created before building model")
-        
+
+        # v2.0: Determinar semilla — parámetro > TrainingConfig > default 42
+        if random_seed is not None:
+            seed = random_seed
+        elif self._training_config is not None:
+            seed = self._training_config.random_seed
+        else:
+            seed = 42
+
+        # v2.0: Fijar TODAS las semillas antes de crear el modelo
+        import torch
+        import numpy as np
+        import random
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        # CUDA semilla también si está disponible
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        self.logger.info(f"NN weight initialization: torch.manual_seed({seed})")
+
         self._model = DynamicNN(self._architecture)
         self._model.to(self._device)
-        
+
         return self._model
     
     def create_training_config(
@@ -640,8 +678,9 @@ class NeuralNetworkBuilder(LoggerMixin):
         config = self._training_config
         
         # Convert to tensors
-        X_train_tensor = torch.FloatTensor(X_train).to(self._device)
-        y_train_tensor = torch.FloatTensor(y_train).to(self._device)
+        # v2.0 FIX: np.asarray() handles DataFrames/Series safely.
+        X_train_tensor = torch.FloatTensor(np.asarray(X_train)).to(self._device)
+        y_train_tensor = torch.FloatTensor(np.asarray(y_train)).to(self._device)
         
         if y_train_tensor.dim() == 1:
             y_train_tensor = y_train_tensor.unsqueeze(1)
@@ -657,8 +696,9 @@ class NeuralNetworkBuilder(LoggerMixin):
         
         # Validation data
         if X_val is not None and y_val is not None:
-            X_val_tensor = torch.FloatTensor(X_val).to(self._device)
-            y_val_tensor = torch.FloatTensor(y_val).to(self._device)
+            # v2.0 FIX: np.asarray() handles DataFrames/Series safely.
+            X_val_tensor = torch.FloatTensor(np.asarray(X_val)).to(self._device)
+            y_val_tensor = torch.FloatTensor(np.asarray(y_val)).to(self._device)
             if y_val_tensor.dim() == 1:
                 y_val_tensor = y_val_tensor.unsqueeze(1)
         else:
@@ -666,24 +706,24 @@ class NeuralNetworkBuilder(LoggerMixin):
             y_val_tensor = None
         
         # Optimizer and scheduler
-        # FIX: Verificacion exhaustiva de parametros antes de crear el optimizador
+        # FIX: Exhaustive parameter verification before creating optimizer
         if self._model is None:
-            raise ValueError("El modelo no ha sido construido. Llama a build_model() primero.")
+            raise ValueError("The model has not been built. Call build_model() first.")
         
         model_params = list(self._model.parameters())
         if len(model_params) == 0:
             raise ValueError(
-                "El modelo no tiene parametros entrenables. "
-                "Esto puede ocurrir si:\n"
-                "1. No se agregaron capas ocultas\n"
-                "2. El modelo no se inicializo correctamente\n"
-                "3. Hay un problema con la herencia de nn.Module"
+                "The model has no trainable parameters. "
+                "This can happen if:\n"
+                "1. No hidden layers were added\n"
+                "2. The model was not initialized correctly\n"
+                "3. There is a problem with nn.Module inheritance"
             )
         
-        # FIX: Verificar que los parametros requieren gradiente
+        # FIX: Verify parameters require gradients
         trainable_params = [p for p in model_params if p.requires_grad]
         if len(trainable_params) == 0:
-            raise ValueError("Ningun parametro del modelo requiere gradiente.")
+            raise ValueError("No model parameters require gradients.")
         
         optimizer = self._get_optimizer(trainable_params)
         scheduler = self._get_scheduler(optimizer)
@@ -751,7 +791,7 @@ class NeuralNetworkBuilder(LoggerMixin):
             
             # Progress callback
             if progress_callback:
-                progress_callback(epoch + 1, avg_train_loss, val_loss if val_loss else 0)
+                progress_callback(epoch + 1, avg_train_loss, val_loss if val_loss is not None else 0.0)
             
             if verbose and (epoch + 1) % 10 == 0:
                 msg = f"Epoch {epoch + 1}/{config.epochs} - Train Loss: {avg_train_loss:.6f}"
@@ -774,7 +814,8 @@ class NeuralNetworkBuilder(LoggerMixin):
             raise ValueError("Model must be trained before prediction")
         
         self._model.eval()
-        X_tensor = torch.FloatTensor(X).to(self._device)
+        # v2.0 FIX: np.asarray() handles DataFrames/Series safely.
+        X_tensor = torch.FloatTensor(np.asarray(X)).to(self._device)
         
         with torch.no_grad():
             predictions = self._model(X_tensor)
@@ -826,7 +867,13 @@ class NeuralNetworkBuilder(LoggerMixin):
         Args:
             path: Path to model file
         """
-        checkpoint = torch.load(path, map_location=self._device)
+        # PyTorch 2.6+ changed weights_only default to True, breaking numpy scalar loading
+        # We explicitly set weights_only=False since we save trusted checkpoints
+        try:
+            checkpoint = torch.load(path, map_location=self._device, weights_only=False)
+        except TypeError:
+            # PyTorch < 2.6 doesn't have weights_only parameter
+            checkpoint = torch.load(path, map_location=self._device)
         
         # Recreate architecture
         arch_dict = checkpoint['architecture']

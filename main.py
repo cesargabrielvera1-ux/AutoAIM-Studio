@@ -73,7 +73,7 @@ def print_banner():
     banner = """
     ╔═══════════════════════════════════════════════════════════════╗
     ║                                                               ║
-    ║           Materials AutoML Studio v1.4.0                      ║
+    ║           Materials AutoML Studio v1.5.0                      ║
     ║                                                               ║
     ║   Automated Machine Learning for Materials Science           ║
     ║                                                               ║
@@ -103,8 +103,17 @@ def main():
     # Create application
     app = QApplication(sys.argv)
     app.setApplicationName("Materials AutoML Studio")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("2.0.0")
     app.setOrganizationName("MaterialsAutoML")
+    
+    # v2.0: Global tooltip style — 50% larger font with word-wrap to prevent overflow
+    app.setStyleSheet("""
+        QToolTip {
+            font-size: 15pt;
+            padding: 6px;
+            max-width: 600px;
+        }
+    """)
     
     # Create and show main window
     try:

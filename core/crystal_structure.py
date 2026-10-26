@@ -28,16 +28,16 @@ _PMG_IMPORT_ERROR = None
 
 def _find_pymatgen_data_in_bundle():
     """
-    Buscar archivos de datos de pymatgen dentro del bundle de PyInstaller.
-    Retorna la ruta al directorio que contiene el directorio 'core/' con los datos,
-    o None si no se encuentra.
+    Search for pymatgen data files inside the PyInstaller bundle.
+    Returns the path to the directory containing the 'core/' directory with data,
+    or None if not found.
     """
     import os as _os
     
     _meipass = getattr(sys, '_MEIPASS', None)
     _exe_dir = _os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else None
     
-    # Lugares donde buscar, en orden de prioridad
+    # Places to search, in priority order
     _search_roots = []
     if _meipass:
         _search_roots.append(_meipass)
@@ -53,7 +53,7 @@ def _find_pymatgen_data_in_bundle():
     # pymatgen_core es para versiones split-package anteriores.
     _pmg_subdirs = ['pymatgen', 'pymatgen_core', 'pymatgen-core']
     
-    # Buscar periodic_table.json.gz
+    # Search for periodic_table.json.gz
     for _root in _search_roots:
         for _subdir in _pmg_subdirs:
             _candidate = _os.path.join(_root, _subdir)
@@ -91,7 +91,7 @@ def _try_import_pymatgen():
         _pmg_data_dir = None
         
         if _meipass:
-            # Buscar los datos de pymatgen en el bundle
+            # Search for pymatgen data in the bundle
             _pmg_data_dir = _find_pymatgen_data_in_bundle()
             
             if _pmg_data_dir:
@@ -128,11 +128,11 @@ def _try_import_pymatgen():
                 f"\n\n[PyInstaller Debug] _MEIPASS={_meipass}\n"
                 f"[PyInstaller Debug] PMG_HOME={_pmg_home}\n"
                 f"[PyInstaller Debug] Error type: {type(e).__name__}\n"
-                f"\nPara arreglar:\n"
-                f"1. Asegurate de que build_windows_onedir.bat tenga:\n"
+                f"\nTo fix:\n"
+                f"1. Ensure build_windows_onedir.bat has:\n"
                 f"   --collect-all pymatgen ^\n"
                 f"   --collect-all pymatgen-core ^\n"
-                f"2. O ejecuta directamente con el .spec:\n"
+                f"2. Or run directly with the .spec:\n"
                 f"   pyinstaller materials_automl_win.spec"
             )
         return False

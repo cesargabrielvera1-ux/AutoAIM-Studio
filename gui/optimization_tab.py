@@ -12,17 +12,62 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from ..core.optimizer import HyperparameterOptimizer, OptimizationResult
+from ..core.optimizer import HyperparameterOptimizer, GridSearchOptimizer, OptimizationResult
+from ..core.model_registry import ModelRegistry  # v2.0: for default_params access
+from ..core.cv_factory import CVConfig, validate_cv_config, has_blocking_issue
+from ..core.grouping import GroupingError
+from ..core.cv_display import format_cv_details
+from .cv_config_widget import CVConfigWidget
 
 logger = logging.getLogger(__name__)
 
 
 def _safe_get_parent_attr(widget, attr_path, default=None):
-    """Safely get a nested attribute from widget.parent."""
-    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+    """Safely get a nested attribute from the widget's main window.
+    
+    v2.0 FIX: After addTab(), widget.parent() returns the QTabWidget — NOT
+    the MainWindow. We first try the _main_window reference stored during
+    __init__, then fall back to walking the entire parent chain until we find
+    an object that has the first attribute in attr_path.
+    """
+    if widget is None:
         return default
+    
     parts = attr_path.split('.')
-    obj = widget.parent
+    first_attr = parts[0]
+    
+    # v2.0: Strategy 1 — use the _main_window reference stored in __init__
+    # before addTab() reparented the widget.
+    obj = getattr(widget, '_main_window', None)
+    if obj is not None and hasattr(obj, first_attr):
+        pass  # Fast path: _main_window has the attribute
+    else:
+        # Strategy 2 — walk the full parent chain looking for an object
+        # that has the first attribute. This covers addTab() reparenting.
+        try:
+            current = widget.parent()
+        except (TypeError, AttributeError):
+            return default
+        
+        obj = None
+        visited = set()  # Guard against circular references
+        while current is not None:
+            obj_id = id(current)
+            if obj_id in visited:
+                break
+            visited.add(obj_id)
+            if hasattr(current, first_attr):
+                obj = current
+                break
+            try:
+                current = current.parent()
+            except (TypeError, AttributeError):
+                break
+        
+        if obj is None:
+            return default
+    
+    # Traverse the rest of the attribute path
     try:
         for part in parts:
             if part.endswith('()'):
@@ -213,6 +258,7 @@ class OptimizationParamSelectorDialog(QDialog):
         btn_layout = QHBoxLayout()
         
         select_all_btn = QPushButton("Select All")
+        select_all_btn.setToolTip("Select all models for optimization")
         select_all_btn.clicked.connect(self._select_all)
         btn_layout.addWidget(select_all_btn)
         
@@ -222,6 +268,7 @@ class OptimizationParamSelectorDialog(QDialog):
         btn_layout.addWidget(select_rec_btn)
         
         clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.setToolTip("Deselect all models")
         clear_all_btn.clicked.connect(self._clear_all)
         btn_layout.addWidget(clear_all_btn)
         
@@ -277,14 +324,19 @@ class OptimizationParamSelectorDialog(QDialog):
 
 
 class OptimizationThread(QThread):
-    """Thread for running hyperparameter optimization."""
+    """Thread for running hyperparameter optimization (Bayesian or Grid Search)."""
     progress = pyqtSignal(int, float, dict)
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
     
     def __init__(self, optimizer, model_type, algorithm, param_ranges, n_trials,
                  X_train, y_train, X_test, y_test, problem_type, cv_folds=5,
-                 timeout=None, pruning=True, random_state=42):
+                 timeout=None, pruning=True, random_state=42,
+                 selected_params=None, default_params=None,
+                 search_strategy="bayesian", grid_resolution="medium",
+                 cv_strategy='kfold', cv_config=None, cv_groups=None,
+                 # v2.0: preprocessor for sklearn Pipeline (eliminates CV data leakage)
+                 preprocessor=None):
         super().__init__()
         self.optimizer = optimizer
         self.model_type = model_type
@@ -300,28 +352,69 @@ class OptimizationThread(QThread):
         self.timeout = timeout
         self.pruning = pruning
         self.random_state = random_state
-    
+        self.selected_params = selected_params
+        self.default_params = default_params
+        self.search_strategy = search_strategy
+        self.grid_resolution = grid_resolution
+        self.cv_strategy = cv_strategy
+        # v2.0: full CV config + resolved group labels
+        self.cv_config = cv_config
+        self.cv_groups = cv_groups
+        # v2.0: preprocessor passed through for Pipeline construction
+        self.preprocessor = preprocessor
+
     def run(self):
         try:
             def progress_callback(trial_num, score, params):
                 self.progress.emit(trial_num, score, params)
-            
-            result = self.optimizer.optimize_sklearn_model(
-                model_type=self.model_type,
-                algorithm=self.algorithm,
-                X_train=self.X_train,
-                y_train=self.y_train,
-                X_test=self.X_test,
-                y_test=self.y_test,
-                problem_type=self.problem_type,
-                param_ranges=self.param_ranges,
-                n_trials=self.n_trials,
-                cv_folds=self.cv_folds,
-                timeout=self.timeout,
-                pruning=self.pruning,
-                random_state=self.random_state,
-                progress_callback=progress_callback
-            )
+
+            if self.search_strategy == "grid":
+                # Use GridSearchOptimizer
+                gs_optimizer = GridSearchOptimizer(resolution=self.grid_resolution)
+                result = gs_optimizer.optimize_sklearn_model(
+                    model_type=self.model_type,
+                    algorithm=self.algorithm,
+                    X_train=self.X_train,
+                    y_train=self.y_train,
+                    X_test=self.X_test,
+                    y_test=self.y_test,
+                    problem_type=self.problem_type,
+                    param_ranges=self.param_ranges,
+                    cv_folds=self.cv_folds,
+                    timeout=self.timeout if self.timeout else None,
+                    progress_callback=progress_callback,
+                    random_state=self.random_state,
+                    selected_params=self.selected_params,
+                    default_params=self.default_params,
+                    cv_strategy=self.cv_strategy,
+                    cv_config=self.cv_config,
+                    cv_groups=self.cv_groups,
+                    preprocessor=self.preprocessor,
+                )
+            else:
+                # Use Bayesian (Optuna)
+                result = self.optimizer.optimize_sklearn_model(
+                    model_type=self.model_type,
+                    algorithm=self.algorithm,
+                    X_train=self.X_train,
+                    y_train=self.y_train,
+                    X_test=self.X_test,
+                    y_test=self.y_test,
+                    problem_type=self.problem_type,
+                    param_ranges=self.param_ranges,
+                    n_trials=self.n_trials,
+                    cv_folds=self.cv_folds,
+                    timeout=self.timeout,
+                    pruning=self.pruning,
+                    random_state=self.random_state,
+                    progress_callback=progress_callback,
+                    selected_params=self.selected_params,
+                    default_params=self.default_params,
+                    cv_strategy=self.cv_strategy,
+                    cv_config=self.cv_config,
+                    cv_groups=self.cv_groups,
+                    preprocessor=self.preprocessor,
+                )
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
@@ -334,7 +427,9 @@ class TrainBestThread(QThread):
     error = pyqtSignal(str)
     
     def __init__(self, trainer, model, model_name, X_train, y_train, X_test, y_test,
-                 problem_type, cv_folds, feature_names=None):
+                 problem_type, cv_folds, feature_names=None,
+                 X_external_val=None, y_external_val=None,
+                 cv_strategy='kfold', cv_config=None, cv_groups=None):
         super().__init__()
         self.trainer = trainer
         self.model = model
@@ -346,12 +441,19 @@ class TrainBestThread(QThread):
         self.problem_type = problem_type
         self.cv_folds = cv_folds
         self.feature_names = feature_names
-    
+        # v1.5.0: External validation set for dual metrics
+        self.X_external_val = X_external_val
+        self.y_external_val = y_external_val
+        self.cv_strategy = cv_strategy
+        # v2.0: full CV config + resolved group labels
+        self.cv_config = cv_config
+        self.cv_groups = cv_groups
+
     def run(self):
         try:
             def progress_callback(msg, progress):
                 self.progress.emit(msg, progress)
-            
+
             result = self.trainer.train(
                 model=self.model,
                 model_name=self.model_name,
@@ -362,7 +464,12 @@ class TrainBestThread(QThread):
                 problem_type=self.problem_type,
                 cv_folds=self.cv_folds,
                 feature_names=self.feature_names,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                X_external_val=self.X_external_val,
+                y_external_val=self.y_external_val,
+                cv_strategy=self.cv_strategy,
+                cv_config=self.cv_config,
+                cv_groups=self.cv_groups,
             )
             self.finished.emit(result)
         except Exception as e:
@@ -374,8 +481,9 @@ class OptimizationTab(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self._main_window = parent  # v2.0 FIX: self.parent overwrites PyQt parent()
         self.optimizer = HyperparameterOptimizer()
+        self.model_registry = ModelRegistry()  # v2.0: for default_params access
         self.optimization_results = []
         self.custom_param_ranges = {}
         self.selected_opt_params = {}  # v1.4.0: param_name -> bool for each model type
@@ -399,10 +507,11 @@ class OptimizationTab(QWidget):
         
         model_layout.addWidget(QLabel("Model Type:"))
         self.model_type_combo = QComboBox()
+        self.model_type_combo.setToolTip("Select which model type to configure hyperparameter ranges for")
         self.model_type_combo.addItems([
-            "Random Forest", "Gradient Boosting", "XGBoost",
-            "LightGBM", "CatBoost", "Support Vector Machine",
-            "k-Nearest Neighbors"
+            "Random Forest", "Gradient Boosting", "Histogram Gradient Boosting",
+            "XGBoost", "LightGBM", "CatBoost", "Support Vector Machine",
+            "k-Nearest Neighbors", "Gaussian Process"
         ])
         self.model_type_combo.currentTextChanged.connect(self._on_model_type_changed)
         model_layout.addWidget(self.model_type_combo)
@@ -413,7 +522,45 @@ class OptimizationTab(QWidget):
         opt_group = QGroupBox("Optimization Configuration")
         opt_layout = QGridLayout(opt_group)
         
-        opt_layout.addWidget(QLabel("Number of Trials:"), 0, 0)
+        # v2.0: Search strategy selection
+        opt_layout.addWidget(QLabel("Search Strategy:"), 0, 0)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["Bayesian (Optuna)", "Grid Search"])
+        self.strategy_combo.setToolTip(
+            "Bayesian: smart exploration, fewer trials, recommended for most cases.\n"
+            "Grid Search: exhaustive evaluation, deterministic, recommended for <=3 parameters."
+        )
+        self.strategy_combo.currentTextChanged.connect(self._on_strategy_changed)
+        opt_layout.addWidget(self.strategy_combo, 0, 1)
+
+        # v2.0: Grid resolution (only visible for Grid Search)
+        opt_layout.addWidget(QLabel("Grid Resolution:"), 1, 0)
+        self.grid_resolution_combo = QComboBox()
+        self.grid_resolution_combo.addItems(["Coarse (3 pts)", "Medium (5 pts)", "Fine (7 pts)"])
+        self.grid_resolution_combo.setCurrentIndex(1)
+        self.grid_resolution_combo.setToolTip(
+            "Number of grid points per parameter. Coarse = faster but less precise. "
+            "Fine = slower but more thorough."
+        )
+        self.grid_resolution_combo.setEnabled(False)
+        opt_layout.addWidget(self.grid_resolution_combo, 1, 1)
+
+        # v2.0: Grid resolution info label (shown when Bayesian selected)
+        self.grid_info_label = QLabel(
+            "ℹ Grid Resolution is only used with Grid Search. "
+            "Bayesian optimization uses adaptive sampling, not fixed grids."
+        )
+        self.grid_info_label.setStyleSheet("color: #ff9800; font-size: 8pt;")
+        self.grid_info_label.setWordWrap(True)
+        opt_layout.addWidget(self.grid_info_label, 2, 0, 1, 2)
+
+        # v2.0: Grid estimation label
+        self.grid_estimate_label = QLabel("")
+        self.grid_estimate_label.setStyleSheet("color: #ff9800; font-size: 8pt;")
+        self.grid_estimate_label.setWordWrap(True)
+        opt_layout.addWidget(self.grid_estimate_label, 3, 0, 1, 2)
+
+        opt_layout.addWidget(QLabel("Number of Trials:"), 4, 0)
         self.trials_spin = QSpinBox()
         self.trials_spin.setRange(10, 200)
         self.trials_spin.setValue(50)
@@ -423,19 +570,19 @@ class OptimizationTab(QWidget):
             "of hyperparameters. More trials = better results but much longer. "
             "50 is a good balance for most problems."
         )
-        opt_layout.addWidget(self.trials_spin, 0, 1)
+        opt_layout.addWidget(self.trials_spin, 4, 1)
         
-        opt_layout.addWidget(QLabel("CV Folds:"), 1, 0)
-        self.cv_folds_spin = QSpinBox()
-        self.cv_folds_spin.setRange(1, 10)
-        self.cv_folds_spin.setValue(5)
-        self.cv_folds_spin.setToolTip(
-            "Cross-validation folds used to evaluate each trial. "
-            "Higher = more reliable score estimates during optimization."
-        )
-        opt_layout.addWidget(self.cv_folds_spin, 1, 1)
+        # v2.0: Shared cross-validation configuration widget (replaces the
+        # triplicated CV Folds / CV Strategy / LOO-info controls). Exposes
+        # K-Fold, Stratified, Group K-Fold, LOO and LOGO with no duplicated code.
+        self.cv_widget = CVConfigWidget()
+        # Backward-compatible aliases into the widget's controls.
+        self.cv_folds_spin = self.cv_widget.folds_spin
+        self.cv_strategy_combo = self.cv_widget.strategy_combo
+        self.loo_info_label = self.cv_widget.info_label
+        opt_layout.addWidget(self.cv_widget, 5, 0, 1, 2)
         
-        opt_layout.addWidget(QLabel("Random Seed:"), 2, 0)
+        opt_layout.addWidget(QLabel("Random Seed:"), 8, 0)
         self.random_seed_spin = QSpinBox()
         self.random_seed_spin.setRange(0, 9999)
         self.random_seed_spin.setValue(42)
@@ -443,9 +590,9 @@ class OptimizationTab(QWidget):
             "Random seed for reproducible optimization. "
             "Same seed = same sequence of hyperparameter trials."
         )
-        opt_layout.addWidget(self.random_seed_spin, 2, 1)
+        opt_layout.addWidget(self.random_seed_spin, 8, 1)
         
-        opt_layout.addWidget(QLabel("Timeout (s, 0 = none):"), 3, 0)
+        opt_layout.addWidget(QLabel("Timeout (s, 0 = none):"), 9, 0)
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(0, 36000)
         self.timeout_spin.setValue(0)
@@ -454,7 +601,7 @@ class OptimizationTab(QWidget):
             "Maximum time allowed for optimization (seconds). "
             "0 = no limit. Useful to prevent runaway optimizations on slow machines."
         )
-        opt_layout.addWidget(self.timeout_spin, 3, 1)
+        opt_layout.addWidget(self.timeout_spin, 9, 1)
         
         self.pruning_check = QCheckBox("Enable Pruning (stop unpromising trials)")
         self.pruning_check.setChecked(True)
@@ -463,7 +610,7 @@ class OptimizationTab(QWidget):
             "Speeds up optimization by ~30-50% without sacrificing quality. "
             "Recommended: leave enabled."
         )
-        opt_layout.addWidget(self.pruning_check, 4, 0, 1, 2)
+        opt_layout.addWidget(self.pruning_check, 10, 0, 1, 2)
         
         # v1.4.0: Compact 3-button toolbar (was 3 separate rows)
         btn_style = "QPushButton{padding:3px 6px;font-size:8pt;}"
@@ -471,27 +618,27 @@ class OptimizationTab(QWidget):
         self.select_params_btn = QPushButton("Select Params")
         self.select_params_btn.setStyleSheet(btn_style)
         self.select_params_btn.setToolTip(
-            "Choose which hyperparameters Optuna will optimize. "
+            "Choose which hyperparameters to optimize. "
             "Unselect low-impact parameters to speed up optimization on CPU."
         )
         self.select_params_btn.clicked.connect(self._select_opt_params)
-        opt_layout.addWidget(self.select_params_btn, 5, 0)
+        opt_layout.addWidget(self.select_params_btn, 8, 0)
         
         self.edit_ranges_btn = QPushButton("Edit Ranges")
         self.edit_ranges_btn.setStyleSheet(btn_style)
         self.edit_ranges_btn.clicked.connect(self._edit_parameter_ranges)
-        opt_layout.addWidget(self.edit_ranges_btn, 5, 1)
+        opt_layout.addWidget(self.edit_ranges_btn, 8, 1)
         
         self.reset_ranges_btn = QPushButton("Reset")
         self.reset_ranges_btn.setStyleSheet(btn_style)
         self.reset_ranges_btn.clicked.connect(self._reset_parameter_ranges)
         self.reset_ranges_btn.setEnabled(False)
-        opt_layout.addWidget(self.reset_ranges_btn, 5, 2)
+        opt_layout.addWidget(self.reset_ranges_btn, 8, 2)
         
         # Single compact status label
         self.ranges_label = QLabel("Default ranges, all params")
         self.ranges_label.setStyleSheet("color: #888888; font-size: 7pt;")
-        opt_layout.addWidget(self.ranges_label, 5, 3)
+        opt_layout.addWidget(self.ranges_label, 8, 3)
         
         left_layout.addWidget(opt_group)
         
@@ -601,6 +748,95 @@ class OptimizationTab(QWidget):
             param_ranges = self.optimizer.get_param_ranges(model_type)
             n_total = len(param_ranges) if param_ranges else 0
             self.ranges_label.setText(f"Default ranges, all {n_total} params")
+
+        # v2.0: Random Seed only applies to stochastic models. Disable it for
+        # deterministic models (SVR, k-NN) that accept no random_state, so the
+        # user is never offered a control that would have no effect.
+        supports_rs = model_type not in ('Support Vector Machine', 'k-Nearest Neighbors')
+        self.random_seed_spin.setEnabled(supports_rs)
+        if supports_rs:
+            self.random_seed_spin.setToolTip(
+                "Random seed for reproducible optimization. "
+                "Same seed = same sequence of hyperparameter trials."
+            )
+        else:
+            self.random_seed_spin.setToolTip(
+                f"{model_type} is deterministic (no random_state), so the Random "
+                "Seed has no effect. It only controls the CV split shuffling "
+                "for this model."
+            )
+        # v2.0: Update grid estimate
+        self._update_grid_estimate()
+
+    def _on_strategy_changed(self):
+        """v2.0: Handle search strategy change (Bayesian vs Grid Search)."""
+        is_grid = self.strategy_combo.currentText() == "Grid Search"
+        self.grid_resolution_combo.setEnabled(is_grid)
+        self.trials_spin.setEnabled(not is_grid)
+        self.pruning_check.setEnabled(not is_grid)
+        self.timeout_spin.setEnabled(not is_grid)
+        if is_grid:
+            self.grid_info_label.setText("")
+        else:
+            self.grid_info_label.setText(
+                "ℹ Grid Resolution is only used with Grid Search. "
+                "Bayesian optimization uses adaptive sampling, not fixed grids."
+            )
+        self._update_grid_estimate()
+
+    def _on_cv_strategy_changed(self, text: str):
+        """Legacy hook — the shared CVConfigWidget handles its own visibility."""
+        pass
+
+    def _get_cv_config(self) -> CVConfig:
+        """Return the full CVConfig from the shared widget."""
+        return self.cv_widget.get_config()
+
+    def _resolve_cv_groups(self, cv_config: CVConfig, data_manager,
+                           test_size: float, random_state: int) -> tuple:
+        """Resolve group labels for grouped CV, aligned to the training rows.
+
+        Returns (groups_train, group_info); both None for non-grouped strategies.
+        Raises GroupingError with a user-facing message on failure.
+        """
+        if cv_config.strategy not in ('group', 'logo'):
+            return None, None
+        groups_full, group_info = self.cv_widget.resolve_groups()
+        groups_train = data_manager.get_train_group_labels(
+            groups_full, test_size=test_size, random_state=random_state,
+        )
+        cv_config.groups = np.asarray(groups_train)
+        return groups_train, group_info
+
+    def _update_grid_estimate(self):
+        """v2.0: Estimate and display GridSearch combinations."""
+        is_grid = self.strategy_combo.currentText() == "Grid Search"
+        if not is_grid:
+            self.grid_estimate_label.setText("")
+            return
+        model_type = self.model_type_combo.currentText()
+        algorithm = model_type
+        param_ranges = self.custom_param_ranges.get(model_type)
+        if param_ranges is None:
+            param_ranges = self.optimizer.get_param_ranges(algorithm)
+        if not param_ranges:
+            self.grid_estimate_label.setText("")
+            return
+        # Get selected params
+        algo_key = algorithm.lower().replace(' ', '_')
+        selected = self.selected_opt_params.get(algo_key)
+        resolution_map = {'Coarse (3 pts)': 'coarse', 'Medium (5 pts)': 'medium', 'Fine (7 pts)': 'fine'}
+        resolution = resolution_map.get(self.grid_resolution_combo.currentText(), 'medium')
+        gs = GridSearchOptimizer(resolution=resolution)
+        try:
+            grid = gs._ranges_to_grid(param_ranges, selected)
+            n = gs._estimate_combinations(grid)
+            est_min = max(1, int(n * 0.5))  # rough estimate
+            self.grid_estimate_label.setText(
+                f"Est. combinations: ~{n} (takes ~{est_min} min at 30s/model)"
+            )
+        except Exception:
+            self.grid_estimate_label.setText("Unable to estimate — check parameter ranges")
     
     def _select_opt_params(self):
         """v1.4.0: Open dialog to select which parameters to optimize."""
@@ -639,6 +875,15 @@ class OptimizationTab(QWidget):
         if param_ranges is None:
             param_ranges = self.optimizer.get_param_ranges(self.model_type_combo.currentText())
         
+        # v1.5.0: Filter to show only selected parameters for optimization
+        algo_key = model_type.lower().replace(' ', '_')
+        selected = self.selected_opt_params.get(algo_key)
+        if selected:
+            param_ranges = {
+                k: v for k, v in param_ranges.items()
+                if selected.get(k, True)
+            }
+        
         dialog = ParameterRangeDialog(param_ranges, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.custom_param_ranges[model_type] = dialog.get_custom_ranges()
@@ -660,9 +905,8 @@ class OptimizationTab(QWidget):
             QMessageBox.warning(self, "Warning", "No data loaded!")
             return
         
-        # Get data (use external validation set if loaded)
-        use_val = data_manager.validation_data is not None
-        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+        # v1.5.0: Always use internal test split; external validation is separate
+        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
         
         if X_train is None or y_train is None:
             QMessageBox.warning(self, "Warning", "No training data available!")
@@ -677,38 +921,121 @@ class OptimizationTab(QWidget):
         pruning = self.pruning_check.isChecked()
         problem_type = self.problem_type_combo.currentText().lower()
         
+        # v2.0: Search strategy
+        is_grid = self.strategy_combo.currentText() == "Grid Search"
+        search_strategy = "grid" if is_grid else "bayesian"
+        resolution_map = {'Coarse (3 pts)': 'coarse', 'Medium (5 pts)': 'medium', 'Fine (7 pts)': 'fine'}
+        grid_resolution = resolution_map.get(self.grid_resolution_combo.currentText(), 'medium')
+        
         # Get parameter ranges
         param_ranges = self.custom_param_ranges.get(model_type)
         if param_ranges is None:
             param_ranges = self.optimizer.get_param_ranges(algorithm)
-        
-        # v1.4.0: Filter param_ranges to only selected parameters
+
+        # v2.0: Get default_params to preserve fixed settings (n_jobs, etc.)
+        default_params = None
+        try:
+            model_info = self.model_registry.get_model(model_type)
+            default_params = model_info.default_params.copy()
+        except Exception:
+            pass  # Model not in registry — optimizer will use defaults
+
+        # v1.5.0: Get selected parameters (which ones to optimize vs use defaults)
         algo_key = algorithm.lower().replace(' ', '_')
-        selected = self.selected_opt_params.get(algo_key)
-        if selected:
-            param_ranges = {
-                k: v for k, v in param_ranges.items()
-                if selected.get(k, True)
-            }
-            if not param_ranges:
-                QMessageBox.warning(self, "Warning", 
+        selected_params = self.selected_opt_params.get(algo_key)
+        if selected_params:
+            n_checked = sum(1 for v in selected_params.values() if v)
+            if n_checked == 0:
+                QMessageBox.warning(self, "Warning",
                     "No parameters selected for optimization. "
                     "Please use 'Select Parameters to Optimize' to choose at least one parameter.")
                 return
-        
+
         # Start optimization
         self.optimize_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
         self.progress_text.clear()
         self.results_table.setRowCount(0)
-        
+
+        search_strategy = self.strategy_combo.currentText()
+        if search_strategy == "Grid Search":
+            # GridSearchCV has no per-iteration callback → indeterminate bar
+            self.progress_bar.setRange(0, 0)
+            self.progress_text.append(
+                f"Starting Grid Search optimization...\n"
+                f"Strategy: {self.algo_combo.currentText()} | "
+                f"CV: {self.cv_folds_spin.value()}-fold | "
+                f"Resolution: {self.grid_resolution_combo.currentText()}"
+            )
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_text.append(
+                f"Starting Bayesian optimization ({n_trials} trials)...\n"
+                f"Strategy: {self.algo_combo.currentText()} | "
+                f"CV: {self.cv_folds_spin.value()}-fold"
+            )
+
+        # v2.0: Configure the shared CV widget with the dataset + problem type +
+        # target (for point-mass detection), build the full CV config, resolve
+        # groups, and validate via the shared cv_factory rules (BLOCK aborts,
+        # WARN asks for confirmation).
+        self.cv_widget.set_dataframe(data_manager.data)
+        self.cv_widget.set_problem_type(problem_type)
+        try:
+            self.cv_widget.set_target_values(data_manager.data[data_manager.target_column].values)
+        except Exception:
+            self.cv_widget.set_target_values(None)
+        cv_config = self._get_cv_config()
+        # v2.0: sync the CV fold shuffling with the user's Random Seed so the
+        # seed controls the model init, the sampler, AND the CV folds.
+        cv_config.random_state = self.random_seed_spin.value()
+        # prepare_data(use_validation=False) uses its default test_size/seed.
+        _split_test_size, _split_seed = 0.2, 42
+        try:
+            cv_groups, group_info = self._resolve_cv_groups(
+                cv_config, data_manager,
+                test_size=_split_test_size, random_state=_split_seed,
+            )
+        except GroupingError as e:
+            QMessageBox.warning(self, "Grouping Error", str(e))
+            return
+        _gi = group_info if cv_config.strategy in ('group', 'logo') else None
+        _issues = validate_cv_config(cv_config, len(X_train),
+                                     problem_type=problem_type, group_info=_gi,
+                                     y=y_train)
+        if has_blocking_issue(_issues):
+            QMessageBox.warning(self, "Cross-Validation Not Available",
+                                "\n\n".join(i['message'] for i in _issues if i['severity'] == 'block'))
+            return
+        _warns = [i['message'] for i in _issues if i['severity'] == 'warn']
+        if _warns:
+            reply = QMessageBox.question(
+                self, "Cross-Validation Warning",
+                "\n\n".join(_warns) + "\n\nDo you want to proceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # v2.0: Pass the unfitted preprocessor so the optimizer builds a Pipeline
+        # that eliminates data leakage by refitting the scaler inside each CV fold.
+        preprocessor = data_manager.get_preprocessor()
         self.optimization_thread = OptimizationThread(
             self.optimizer, model_type, algorithm, param_ranges, n_trials,
             X_train, y_train, X_test, y_test, problem_type, cv_folds,
             timeout=timeout if timeout > 0 else None,
             pruning=pruning,
-            random_state=self.random_seed_spin.value()
+            random_state=self.random_seed_spin.value(),
+            selected_params=selected_params,
+            default_params=default_params,
+            search_strategy=search_strategy,
+            grid_resolution=grid_resolution,
+            cv_strategy=cv_config.strategy,
+            cv_config=cv_config,
+            cv_groups=cv_groups,
+            preprocessor=preprocessor,
         )
         self.optimization_thread.progress.connect(self._on_optimization_progress)
         self.optimization_thread.finished.connect(self._on_optimization_finished)
@@ -716,11 +1043,31 @@ class OptimizationTab(QWidget):
         self.optimization_thread.start()
     
     def _on_optimization_progress(self, trial_num, score, params):
-        """Handle optimization progress."""
-        self.progress_bar.setValue(int(100 * trial_num / self.trials_spin.value()))
-        self.progress_text.append(
-            f"Trial {trial_num}: Score={score:.4f}, Params={params}"
-        )
+        """Handle optimization progress.
+
+        v2.0 FIX: Force immediate UI repaint with processEvents() so the
+        Training Progress console updates live during long optimizations.
+        Grid Search runs with an indeterminate bar because GridSearchCV.fit()
+        has no per-iteration callback.
+        """
+        from PyQt6.QtWidgets import QApplication
+
+        is_grid = self.strategy_combo.currentText() == "Grid Search"
+        if is_grid:
+            # GridSearch emits progress only at completion
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+            self.progress_text.append(
+                f"Grid Search complete: Score={score:.4f}, Params={params}"
+            )
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(int(100 * trial_num / self.trials_spin.value()))
+            self.progress_text.append(
+                f"Trial {trial_num}: Score={score:.4f}, Params={params}"
+            )
+        # Force immediate repaint so the user sees updates as they arrive
+        QApplication.processEvents()
     
     def _on_optimization_finished(self, result):
         """Handle optimization completion."""
@@ -739,12 +1086,12 @@ class OptimizationTab(QWidget):
         )
         
         # Store in list for results_tab (list of tuples format)
-        # v1.2.1 FIX: Replace previous optimization of same model_type
-        # instead of appending, to prevent accumulation.
+        # v2.0 FIX: Keep ALL optimizations (don't replace). The previous
+        # code deleted earlier optimizations of the same algorithm, causing
+        # the export to miss optimization details for models trained from
+        # earlier optimizations (e.g., "XGBoost_Optimized" from 5-fold opt
+        # lost its details when user later ran a 3-fold opt of XGBoost).
         model_type = self.model_type_combo.currentText()
-        self.optimization_results = [
-            (mt, r) for mt, r in self.optimization_results if mt != model_type
-        ]
         self.optimization_results.append((model_type, result))
         
         # Display results
@@ -784,9 +1131,13 @@ class OptimizationTab(QWidget):
         problem_type = self.problem_type_combo.currentText().lower()
         cv_folds = self.cv_folds_spin.value()
         
-        # Get data (use external validation set if loaded)
-        use_val = data_manager.validation_data is not None
-        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+        # v1.5.0: Get data with internal split + external validation separately
+        X_train, X_test, y_train, y_test = data_manager.prepare_data(
+            use_validation=False
+        )
+        # Get external validation set if loaded
+        val_arrays = data_manager.get_validation_arrays()
+        X_ext_val, y_ext_val = (val_arrays[0], val_arrays[1]) if val_arrays else (None, None)
         
         # Get feature names
         feature_names = data_manager.data.feature_names if hasattr(data_manager.data, 'feature_names') else None
@@ -798,6 +1149,20 @@ class OptimizationTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_text.append("Training with best parameters...")
         
+        # v2.0: Train the best model with the SAME CV configuration that was
+        # used during optimization (rebuilt from the stored cv_config_dict).
+        # Group labels are re-resolved against the current (identical) split.
+        cv_config = CVConfig.from_dict(getattr(self.last_opt_result, 'cv_config_dict', None))
+        try:
+            cv_groups, _gi = self._resolve_cv_groups(
+                cv_config, data_manager, test_size=0.2, random_state=42,
+            )
+        except GroupingError as e:
+            self.train_best_btn.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            QMessageBox.warning(self, "Grouping Error", str(e))
+            return
+
         # Start training in thread (non-blocking)
         self.train_best_thread = TrainBestThread(
             trainer=trainer,
@@ -809,7 +1174,12 @@ class OptimizationTab(QWidget):
             y_test=y_test,
             problem_type=problem_type,
             cv_folds=cv_folds,
-            feature_names=feature_names
+            feature_names=feature_names,
+            X_external_val=X_ext_val,
+            y_external_val=y_ext_val,
+            cv_strategy=cv_config.strategy,
+            cv_config=cv_config,
+            cv_groups=cv_groups,
         )
         self.train_best_thread.progress.connect(self._on_train_best_progress)
         self.train_best_thread.finished.connect(self._on_train_best_finished)
@@ -827,21 +1197,23 @@ class OptimizationTab(QWidget):
         self.train_best_btn.setEnabled(True)
         self.progress_text.append("Training complete!")
         
-        # v1.3.0: Build detailed message with per-fold CV scores
-        cv_scores = result.cv_metrics.get('test_score', []) if result.cv_metrics else []
+        # v2.0: Build detailed message via the shared CV formatter (handles
+        # kfold / stratified / group / loo / logo with a single code path).
+        cv_metrics_dict = result.cv_metrics if result.cv_metrics else {}
         msg = f"Model trained with best parameters!\n\n"
         msg += f"Name: {result.model_name}\n"
-        
-        if cv_scores:
-            msg += f"\nCV Scores (per fold):\n"
-            for fold_idx, score in enumerate(cv_scores, 1):
-                msg += f"  Fold {fold_idx}: {score:.6f}\n"
-            msg += f"  Mean ± Std: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}\n"
+        cv_text = format_cv_details(
+            cv_metrics_dict,
+            cv_strategy=getattr(result, 'cv_strategy', 'kfold'),
+            cv_config_dict=getattr(result, 'cv_config_dict', None),
+            fmt='text',
+        )
+        if cv_text:
+            msg += "\n" + cv_text
         else:
             msg += f"CV Score: N/A\n"
-        
         msg += f"\nCheck Results tab for full details."
-        
+
         QMessageBox.information(self, "Success", msg)
     
     def _on_train_best_error(self, error_msg):
@@ -866,9 +1238,8 @@ class OptimizationTab(QWidget):
             cv_scores = result.cv_metrics['test_score']
             details += f"CV Score: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}\n"
         
-        # v1.3.0: Merge best_params with model defaults so ALL parameters are shown.
-        # Mark with (*) all parameters that Optuna CAN optimize (from param_ranges),
-        # not just those explicitly present in best_params (which may omit defaults).
+        # v1.5.0: Merge best_params with model defaults so ALL parameters are shown.
+        # Mark with (*) only the parameters the user ACTUALLY selected for optimization.
         from ..core.model_registry import ModelRegistry
         registry = ModelRegistry()
         algorithm = self.model_type_combo.currentText().lower().replace(' ', '_')
@@ -876,8 +1247,12 @@ class OptimizationTab(QWidget):
             model_info = registry.get_model(algorithm)
             full_params = dict(model_info.default_params)  # Start with all defaults
             full_params.update(result.best_params)  # Override with optimized values
-            # Get the set of optimizable params from param_ranges
-            optimizable = set(model_info.param_ranges.keys())
+            # v1.5.0: Only mark as (*) the params the user selected for optimization
+            selected = self.selected_opt_params.get(algorithm, {})
+            optimizable = {k for k, v in selected.items() if v} if selected else set()
+            if not optimizable:
+                # Fallback: if no selection was made, all params from best_params are marked
+                optimizable = set(result.best_params.keys())
             # Remove internal/fixed params that aren't tunable
             for p in ('random_state', 'n_jobs', 'verbose', 'random_seed', 'tree_method'):
                 full_params.pop(p, None)
@@ -912,18 +1287,18 @@ class OptimizationTab(QWidget):
                 
                 self.results_table.setItem(i, 3, QTableWidgetItem(str(trial.get('number', ''))))
         
-        # v1.3.0: Show CV fold scores in details (same format as Training Tab)
-        cv_scores = result.cv_metrics.get('test_score', []) if result.cv_metrics else []
-        if cv_scores and len(cv_scores) > 0:
-            details += "\n\nCross-Validation Scores (per fold):\n"
-            details += "-" * 35 + "\n"
-            for fold_idx, score in enumerate(cv_scores, 1):
-                details += f"  Fold {fold_idx:2d}: {score:.6f}\n"
-            mean_score = np.mean(cv_scores)
-            std_score = np.std(cv_scores)
-            details += f"  {'Mean ± Std':10s}: {mean_score:.6f} ± {std_score:.6f}\n"
-            details += "-" * 35 + "\n"
-        
+        # v2.0: CV breakdown via the shared formatter (single code path for
+        # kfold / stratified / group / loo / logo, incl. Test Size + warnings).
+        cv_metrics_dict = result.cv_metrics if result.cv_metrics else {}
+        cv_text = format_cv_details(
+            cv_metrics_dict,
+            cv_strategy=getattr(result, 'cv_strategy', 'kfold'),
+            cv_config_dict=getattr(result, 'cv_config_dict', None),
+            fmt='text',
+        )
+        if cv_text:
+            details += "\n\n" + cv_text
+
         self.details_text.setPlainText(details)
     
     def get_optimization_result(self, model_name):

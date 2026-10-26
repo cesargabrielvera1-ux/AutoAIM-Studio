@@ -15,27 +15,68 @@ from PyQt6.QtGui import QColor
 
 from ..core.trainer import ModelTrainer
 from ..core.ensemble_trainer import EnsembleResult
+from ..core.session_exporter import SessionExporter
+from ..core.cv_display import format_cv_details, cv_strategy_label
 
 logger = logging.getLogger(__name__)
 
 
 def _safe_get_parent_attr(widget, attr_path, default=None):
-    """Safely get a nested attribute from widget.parent.
+    """Safely get a nested attribute from the widget's main window.
+    
+    v2.0 FIX: After addTab(), widget.parent() returns the QTabWidget — NOT
+    the MainWindow. We first try the _main_window reference stored during
+    __init__, then fall back to walking the entire parent chain until we find
+    an object that has the first attribute in attr_path.
     
     Args:
-        widget: The widget that has a .parent attribute
+        widget: The widget that has a .parent() method
         attr_path: Dot-separated path like 'training_tab.get_trainer'
         default: Value to return if path cannot be resolved
         
     Returns:
         The resolved attribute or default
     """
-    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+    if widget is None:
         return default
     
     parts = attr_path.split('.')
-    obj = widget.parent
+    first_attr = parts[0]
     
+    # v2.0: Strategy 1 — use the _main_window reference stored in __init__
+    # before addTab() reparented the widget.
+    obj = getattr(widget, '_main_window', None)
+    if obj is not None and hasattr(obj, first_attr):
+        # Fast path: _main_window exists and has the attribute we need
+        pass  # obj is already correct, proceed to traverse the rest
+    else:
+        # Strategy 2 — walk the full parent chain looking for an object
+        # that has the first attribute. This covers addTab() reparenting
+        # (QTabWidget -> QStackedWidget -> ... -> MainWindow).
+        try:
+            current = widget.parent()
+        except (TypeError, AttributeError):
+            return default
+        
+        obj = None
+        visited = set()  # Guard against circular references
+        while current is not None:
+            obj_id = id(current)
+            if obj_id in visited:
+                break
+            visited.add(obj_id)
+            if hasattr(current, first_attr):
+                obj = current
+                break
+            try:
+                current = current.parent()
+            except (TypeError, AttributeError):
+                break
+        
+        if obj is None:
+            return default
+    
+    # Traverse the rest of the attribute path
     try:
         for part in parts:
             if part.endswith('()'):
@@ -54,7 +95,10 @@ class ResultsTab(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        # v2.0 FIX: Store main_window reference before addTab() reparents us.
+        # After addTab(), self.parent() returns the QTabWidget (not MainWindow),
+        # so we need this stored reference to access sibling tabs.
+        self._main_window = parent
         
         self._init_ui()
     
@@ -74,15 +118,18 @@ class ResultsTab(QWidget):
         top_layout.addWidget(QLabel("<b>Model Comparison</b>"))
         
         self.comparison_table = QTableWidget()
-        self.comparison_table.setColumnCount(10)
+        # v1.5.0: Added external validation metric columns
+        self.comparison_table.setColumnCount(12)
         self.comparison_table.setHorizontalHeaderLabels([
             'Model', 'RMSE/Acc', 'MAE', 'R²/F1', 'CV Score',
-            'Training Time', 'Rank', 'Select', 'Actions'
+            'Training Time', 'Rank', 'Select', 'Actions',
+            'Val. RMSE/Acc', 'Val. MAE', 'Val. R²/F1'
         ])
         top_layout.addWidget(self.comparison_table)
         
         # Refresh button
         self.refresh_btn = QPushButton("Refresh Results")
+        self.refresh_btn.setToolTip("Update the table with all trained models from this session")
         self.refresh_btn.clicked.connect(self._refresh_results)
         top_layout.addWidget(self.refresh_btn)
         
@@ -107,10 +154,15 @@ class ResultsTab(QWidget):
         export_btn_layout = QHBoxLayout()
         
         self.export_joblib_btn = QPushButton("Export as Joblib")
+        self.export_joblib_btn.setToolTip("Export the raw sklearn model for use in Python scripts")
         self.export_joblib_btn.clicked.connect(self._export_joblib_legacy)
         export_btn_layout.addWidget(self.export_joblib_btn)
         
         self.export_bundle_btn = QPushButton("Export as Model Bundle (Predict)")
+        self.export_bundle_btn.setToolTip(
+            "Export a complete bundle with model + preprocessing + manifest. "
+            "Use this bundle in the Predict tab to make predictions on new data."
+        )
         self.export_bundle_btn.clicked.connect(self._export_model_bundle)
         self.export_bundle_btn.setStyleSheet("background-color: #0d7377; color: white; font-weight: bold;")
         export_btn_layout.addWidget(self.export_bundle_btn)
@@ -119,6 +171,10 @@ class ResultsTab(QWidget):
         
         # Pipeline export
         self.export_pipeline_check = QCheckBox("Include preprocessing pipeline")
+        self.export_pipeline_check.setToolTip(
+            "When checked, the exported model bundle includes the preprocessing "
+            "pipeline so predictions automatically apply the same scaling/imputation."
+        )
         self.export_pipeline_check.setChecked(True)
         model_layout.addWidget(self.export_pipeline_check)
         
@@ -132,14 +188,51 @@ class ResultsTab(QWidget):
         
         report_layout.addWidget(QLabel("Generate Report:"))
         
+        # Session Report Export (v1.5.0)
+        report_layout.addWidget(QLabel("<b>Export Complete Session</b>"))
+        session_info = QLabel(
+            "<small>Exports ALL results from this session to a single file: "
+            "trained models, optimized parameters, neural network training, "
+            "ensembles, and metrics — with a final ranking table.</small>"
+        )
+        session_info.setWordWrap(True)
+        report_layout.addWidget(session_info)
+
+        session_btn_layout = QHBoxLayout()
+
+        self.export_session_txt_btn = QPushButton("Export as .txt")
+        self.export_session_txt_btn.setToolTip("Human-readable text report with all results and ranking")
+        self.export_session_txt_btn.clicked.connect(lambda: self._export_session_report("txt"))
+        session_btn_layout.addWidget(self.export_session_txt_btn)
+
+        self.export_session_md_btn = QPushButton("Export as .md")
+        self.export_session_md_btn.setToolTip("Markdown report for GitHub, papers, or documentation")
+        self.export_session_md_btn.clicked.connect(lambda: self._export_session_report("md"))
+        session_btn_layout.addWidget(self.export_session_md_btn)
+
+        self.export_session_csv_btn = QPushButton("Export as .csv")
+        self.export_session_csv_btn.setToolTip("Spreadsheet-friendly table for Excel")
+        self.export_session_csv_btn.clicked.connect(lambda: self._export_session_report("csv"))
+        session_btn_layout.addWidget(self.export_session_csv_btn)
+
+        self.export_session_json_btn = QPushButton("Export as .json")
+        self.export_session_json_btn.setToolTip("Machine-readable JSON with complete data")
+        self.export_session_json_btn.clicked.connect(lambda: self._export_session_report("json"))
+        session_btn_layout.addWidget(self.export_session_json_btn)
+
+        report_layout.addLayout(session_btn_layout)
+
+        report_layout.addSpacing(20)
+        report_layout.addWidget(QLabel("<b>Generate Report</b>"))
+
         self.report_btn = QPushButton("Generate PDF Report")
         self.report_btn.clicked.connect(self._generate_report)
         report_layout.addWidget(self.report_btn)
-        
+
         self.html_report_btn = QPushButton("Generate HTML Report")
         self.html_report_btn.clicked.connect(self._generate_html_report)
         report_layout.addWidget(self.html_report_btn)
-        
+
         report_layout.addStretch()
         
         export_tabs.addTab(report_export, "Reports")
@@ -192,7 +285,7 @@ class ResultsTab(QWidget):
     
     def _refresh_results(self):
         """Refresh results from training, optimization, and neural networks."""
-        if self.parent is None:
+        if self._main_window is None:
             return
         
         all_results = []
@@ -345,6 +438,24 @@ class ResultsTab(QWidget):
                 cv_label = f"{cv_mean:.4f} ± {cv_std:.4f}"
             
             self.comparison_table.setItem(i, 4, QTableWidgetItem(cv_label))
+            
+            # v1.5.0: External validation metrics (dual reporting)
+            # Column indices: 9=Val.RMSE/Acc, 10=Val.MAE, 11=Val.R2/F1
+            ext_metrics = getattr(result, 'external_metrics', None)
+            has_ext = getattr(result, 'has_external_validation', False)
+            if has_ext and ext_metrics:
+                if problem_type == 'regression':
+                    self.comparison_table.setItem(i, 9, QTableWidgetItem(f"{ext_metrics.get('rmse', 0):.4f}"))
+                    self.comparison_table.setItem(i, 10, QTableWidgetItem(f"{ext_metrics.get('mae', 0):.4f}"))
+                    self.comparison_table.setItem(i, 11, QTableWidgetItem(f"{ext_metrics.get('r2', 0):.4f}"))
+                else:
+                    self.comparison_table.setItem(i, 9, QTableWidgetItem(f"{ext_metrics.get('accuracy', 0):.4f}"))
+                    self.comparison_table.setItem(i, 10, QTableWidgetItem(f"{ext_metrics.get('precision', 0):.4f}"))
+                    self.comparison_table.setItem(i, 11, QTableWidgetItem(f"{ext_metrics.get('f1', 0):.4f}"))
+            else:
+                self.comparison_table.setItem(i, 9, QTableWidgetItem("—"))
+                self.comparison_table.setItem(i, 10, QTableWidgetItem("—"))
+                self.comparison_table.setItem(i, 11, QTableWidgetItem("—"))
             
             # Training time
             time_val = getattr(result, 'training_time', None) or getattr(result, 'optimization_time', None)
@@ -516,6 +627,20 @@ class ResultsTab(QWidget):
                 deleted = True
                 logger.info(f"Deleted '{model_name}' from ensemble_trainer.results")
         
+        # 5. Try optimization_tab.optimization_results (v1.5.0 fix)
+        # Optimization results are stored as (model_type, result) tuples
+        opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
+        if opt_tab and hasattr(opt_tab, 'optimization_results'):
+            orig = len(opt_tab.optimization_results)
+            opt_tab.optimization_results = [
+                (mt, r) for mt, r in opt_tab.optimization_results
+                if not (hasattr(r, 'model_name') and r.model_name == model_name)
+                and mt != model_name
+            ]
+            if len(opt_tab.optimization_results) < orig:
+                deleted = True
+                logger.info(f"Deleted '{model_name}' from optimization_tab.optimization_results")
+        
         if deleted:
             self._refresh_results()
         else:
@@ -532,7 +657,7 @@ class ResultsTab(QWidget):
         btn = self.sender()
         model_name = btn.property('model_name')
         
-        if not self.parent:
+        if not self._main_window:
             QMessageBox.warning(self, "Warning", "Cannot access parent window")
             return
         
@@ -540,14 +665,14 @@ class ResultsTab(QWidget):
         source_type = ""
         
         # 1. Check trained models
-        if hasattr(self.parent, 'training_tab'):
+        if hasattr(self._main_window, 'training_tab'):
             trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             if model_name in trainer.results:
                 result = trainer.results[model_name]
                 source_type = "Trained Model"
         
         # 2. Check optimized models
-        if result is None and hasattr(self.parent, 'optimization_tab'):
+        if result is None and hasattr(self._main_window, 'optimization_tab'):
             opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
             if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                 for opt_name, opt_result in opt_tab.optimization_results:
@@ -557,7 +682,7 @@ class ResultsTab(QWidget):
                         break
         
         # 3. Check neural networks
-        if result is None and hasattr(self.parent, 'nn_tab'):
+        if result is None and hasattr(self._main_window, 'nn_tab'):
             nn_tab = _safe_get_parent_attr(self, 'nn_tab')
             if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                 for nn_name, nn_result in nn_tab.nn_training_results:
@@ -575,7 +700,7 @@ class ResultsTab(QWidget):
                         break
         
         # 4. Check ensemble models
-        if result is None and hasattr(self.parent, 'ensemble_tab'):
+        if result is None and hasattr(self._main_window, 'ensemble_tab'):
             ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
             if hasattr(ens_tab, 'get_ensemble_trainer'):
                 ens_trainer = ens_tab.get_ensemble_trainer()
@@ -597,7 +722,28 @@ class ResultsTab(QWidget):
         # Problem type
         if hasattr(result, 'problem_type'):
             details += f"<p><b>Problem Type:</b> {result.problem_type}</p>"
-        
+
+        # v2.0: Search strategy (for optimized models)
+        search_strategy = getattr(result, 'search_strategy', None)
+        if search_strategy:
+            strat_label = "Bayesian (Optuna)" if search_strategy == "bayesian" else "Grid Search"
+            details += f"<p><b>Search Strategy:</b> {strat_label}</p>"
+
+        # v2.0: CV strategy and folds (full label via the shared formatter)
+        cv_strategy = getattr(result, 'cv_strategy', 'kfold')
+        cv_config_dict = getattr(result, 'cv_config_dict', None)
+        details += f"<p><b>CV Strategy:</b> {cv_strategy_label(cv_strategy, cv_config_dict)}</p>"
+
+        # CV folds (only meaningful for fold-based strategies; for LOO/LOGO the
+        # number of folds equals N samples / n_groups automatically).
+        cv_folds = None
+        if hasattr(result, 'training_config') and result.training_config:
+            cv_folds = result.training_config.get('cv_folds')
+        elif hasattr(result, 'optimization_config') and result.optimization_config:
+            cv_folds = result.optimization_config.get('cv_folds')
+        if cv_folds is not None and cv_strategy not in ('loo', 'logo'):
+            details += f"<p><b>CV Folds:</b> {cv_folds}</p>"
+
         # Training/Optimization time
         if hasattr(result, 'training_time'):
             details += f"<p><b>Training Time:</b> {result.training_time:.2f} seconds</p>"
@@ -641,23 +787,50 @@ class ResultsTab(QWidget):
                 details += f"<li>{feat}: {imp:.4f}</li>"
             details += "</ul>"
         
-        # v1.3.0: Cross-Validation Scores per fold (same format as Training Tab)
-        cv_scores = None
+        # v2.0: Cross-Validation breakdown — delegated to the shared formatter
+        # (cv_display.format_cv_details), which renders every strategy:
+        # kfold / stratified / group (with Test Size) / loo / logo.
+        cv_metrics_dict = None
         if hasattr(result, 'cv_metrics') and result.cv_metrics:
-            cv_scores = result.cv_metrics.get('test_score', [])
+            cv_metrics_dict = result.cv_metrics
         elif hasattr(result, 'cv_scores') and result.cv_scores:
-            cv_scores = result.cv_scores
-        
-        if cv_scores and len(cv_scores) > 0:
-            details += "<h4>Cross-Validation Scores (per fold):</h4><table border='1' cellpadding='5'>"
-            details += "<tr><th>Fold</th><th>Score</th></tr>"
-            for fold_idx, score in enumerate(cv_scores, 1):
-                details += f"<tr><td>Fold {fold_idx}</td><td>{score:.6f}</td></tr>"
-            mean_score = np.mean(cv_scores)
-            std_score = np.std(cv_scores)
-            details += f"<tr><td><b>Mean ± Std</b></td><td><b>{mean_score:.6f} ± {std_score:.6f}</b></td></tr>"
-            details += "</table>"
-        
+            # Legacy NN results stored a bare list under cv_scores.
+            cv_metrics_dict = {'test_score': result.cv_scores}
+
+        details += format_cv_details(
+            cv_metrics_dict,
+            cv_strategy=getattr(result, 'cv_strategy', 'kfold'),
+            cv_config_dict=getattr(result, 'cv_config_dict', None),
+            fmt='html',
+        )
+
+        # v2.0: Gaussian Process native metrics — show in details popup
+        # v2.1: Extended kernel provenance for scientific reproducibility.
+        if hasattr(result, 'gp_metadata') and result.gp_metadata:
+            details += "<h4>Gaussian Process Parameters:</h4><ul>"
+            gp = result.gp_metadata
+            if 'kernel_family' in gp:
+                details += f"<li><b>Kernel Family:</b> {gp['kernel_family']}</li>"
+            if 'kernel_str' in gp:
+                details += f"<li><b>Kernel (fitted):</b> {gp['kernel_str']}</li>"
+            if gp.get('kernel_length_scale') is not None:
+                details += f"<li><b>Kernel Length Scale:</b> {gp['kernel_length_scale']:.4f}</li>"
+            if gp.get('kernel_nu') is not None:
+                details += f"<li><b>Kernel Nu (Matern):</b> {gp['kernel_nu']}</li>"
+            if gp.get('kernel_alpha') is not None:
+                details += f"<li><b>Kernel Alpha (RQ):</b> {gp['kernel_alpha']:.4f}</li>"
+            if gp.get('kernel_noise_level') is not None:
+                details += f"<li><b>Kernel Noise Level:</b> {gp['kernel_noise_level']:.6f}</li>"
+            if 'alpha' in gp:
+                details += f"<li><b>Alpha (noise):</b> {gp['alpha']}</li>"
+            if 'log_marginal_likelihood_value' in gp and gp['log_marginal_likelihood_value'] is not None:
+                details += f"<li><b>Log Marginal Likelihood:</b> {gp['log_marginal_likelihood_value']:.4f}</li>"
+            if 'n_restarts_optimizer' in gp:
+                details += f"<li><b>Optimizer Restarts:</b> {gp['n_restarts_optimizer']}</li>"
+            if 'normalize_y' in gp:
+                details += f"<li><b>Normalize Y:</b> {gp['normalize_y']}</li>"
+            details += "</ul>"
+
         # Neural network specific details
         if hasattr(result, 'is_neural_network') and result.is_neural_network:
             details += "<h4>Neural Network Details:</h4>"
@@ -720,7 +893,7 @@ class ResultsTab(QWidget):
             if bundle_radio.isChecked():
                 self._export_model_bundle(model_name)
             else:
-                self._export_joblib(model_name)
+                self._export_joblib_legacy()
     
     def _export_joblib_legacy(self):
         """Export model as joblib (legacy format)."""
@@ -739,7 +912,7 @@ class ResultsTab(QWidget):
         
         if file_path:
             try:
-                if self.parent and hasattr(self.parent, 'training_tab'):
+                if self._main_window and hasattr(self._main_window, 'training_tab'):
                     trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
                     trainer.save_model(model_name, file_path)
                     QMessageBox.information(self, "Success", f"Model exported to {file_path}")
@@ -759,7 +932,7 @@ class ResultsTab(QWidget):
             return
         
         # Verify we have access to data_manager
-        if not self.parent or not hasattr(self.parent, 'data_tab'):
+        if not self._main_window or not hasattr(self._main_window, 'data_tab'):
             QMessageBox.critical(self, "Error", "Cannot access data manager. Please load data first.")
             return
         
@@ -773,7 +946,7 @@ class ResultsTab(QWidget):
         actual_model_name = model_name
         
         # 1. Check trained models
-        if self.parent and hasattr(self.parent, 'training_tab'):
+        if self._main_window and hasattr(self._main_window, 'training_tab'):
             trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             if model_name in trainer.results:
                 model_result = trainer.results[model_name]
@@ -809,7 +982,7 @@ class ResultsTab(QWidget):
                             break
         
         # 4. Check ensemble models
-        if model_result is None and hasattr(self.parent, 'ensemble_tab'):
+        if model_result is None and hasattr(self._main_window, 'ensemble_tab'):
             ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
             if hasattr(ens_tab, 'get_ensemble_trainer'):
                 ens_trainer = ens_tab.get_ensemble_trainer()
@@ -927,7 +1100,7 @@ if __name__ == "__main__":
     
     def _generate_html_report(self):
         """Generate HTML report."""
-        if self.parent and hasattr(self.parent, 'training_tab'):
+        if self._main_window and hasattr(self._main_window, 'training_tab'):
             trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
             
             # Generate simple HTML report
@@ -1010,7 +1183,7 @@ if __name__ == "__main__":
             return
         
         # Get the model and data
-        if not self.parent or not hasattr(self.parent, 'training_tab'):
+        if not self._main_window or not hasattr(self._main_window, 'training_tab'):
             QMessageBox.critical(self, "Error", "Cannot access training data")
             return
         
@@ -1051,13 +1224,23 @@ if __name__ == "__main__":
             # 4. Check trained models (regular sklearn models)
             elif model_name in trainer.results:
                 result = trainer.results[model_name]
-                model = result.model
+                # v2.0: Load from disk cache if the model was offloaded to free RAM.
+                if result.model is None and getattr(result, 'is_cached', False) and result.model_cache_path:
+                    from ..core.model_cache import get_model_cache
+                    try:
+                        cache = get_model_cache()
+                        model = cache.load(result.model_cache_path, is_neural_network=result.is_neural_network)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Warning", f"Model '{model_name}' is cached but could not be loaded:\n{str(e)}")
+                        return
+                else:
+                    model = result.model
                 source_type = "trained"
-            
+
             else:
                 QMessageBox.warning(self, "Warning", f"Model '{model_name}' not found in any source.")
                 return
-            
+
             # Verify model is valid
             if model is None:
                 QMessageBox.warning(self, "Warning", f"Model '{model_name}' was found but the model object is None.")
@@ -1073,6 +1256,9 @@ if __name__ == "__main__":
                 scoring = 'r2'
             
             # Generate learning curves
+            # v2.0: n_jobs=1 because the model already has internal parallelism
+            # (n_jobs for RF/XGB/LGBM, thread_count for CatBoost). Using n_jobs>1
+            # here would cause nested parallelism / oversubscription.
             train_sizes, train_scores, val_scores = learning_curve(
                 model, X_train, y_train,
                 cv=5,
@@ -1107,6 +1293,17 @@ if __name__ == "__main__":
             
             self.learning_curve_table.resizeColumnsToContents()
             self.export_learning_btn.setEnabled(True)
+            
+            # v1.5.0: Also store in TrainingResult for session export
+            if source_type == "trained" and model_name in trainer.results:
+                trainer.compute_learning_curve(
+                    model_name=model_name,
+                    X=X_train,
+                    y=y_train,
+                    cv_folds=5,
+                    train_sizes=10,
+                    random_state=42,
+                )
             
             QMessageBox.information(
                 self,
@@ -1278,7 +1475,7 @@ if __name__ == "__main__":
                 elif hasattr(result, 'model_names'):
                     ens_result = result
             
-            if ens_result is None and hasattr(self.parent, 'ensemble_tab'):
+            if ens_result is None and hasattr(self._main_window, 'ensemble_tab'):
                 ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
                 if hasattr(ens_tab, 'get_ensemble_trainer') and ens_tab.get_ensemble_trainer():
                     ens_trainer = ens_tab.get_ensemble_trainer()
@@ -1415,3 +1612,320 @@ if __name__ == "__main__":
                 QMessageBox.information(self, "Success", f"Learning curves saved to {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save learning curves:\n{str(e)}")
+
+    def _export_session_report(self, fmt: str):
+        """Export the complete session report to a file (v1.5.0)."""
+        exporter = SessionExporter()
+
+        # ------------------------------------------------------------------
+        # Gather session info (dataset, preprocessing, features)
+        # ------------------------------------------------------------------
+        session_info = {}
+        preprocessing_config = {}
+        feature_names = []
+        try:
+            data_tab = _safe_get_parent_attr(self, 'data_tab')
+            if data_tab and data_tab.data_manager:
+                dm = data_tab.data_manager
+                if dm.data is not None:
+                    session_info['n_samples'] = len(dm.data)
+                    session_info['n_features'] = len(dm.data.columns)
+                session_info['target_column'] = dm.target_column or 'Not set'
+                session_info['problem_type'] = 'classification' if dm.is_classification else 'regression'
+                feature_names = dm.get_feature_names() if hasattr(dm, 'get_feature_names') else []
+
+                # Preprocessing config
+                if hasattr(data_tab, 'impute_combo'):
+                    preprocessing_config['imputation'] = data_tab.impute_combo.currentText()
+                if hasattr(data_tab, 'scale_combo'):
+                    preprocessing_config['scaling'] = data_tab.scale_combo.currentText()
+                if hasattr(data_tab, 'encode_combo'):
+                    preprocessing_config['encoding'] = data_tab.encode_combo.currentText()
+        except Exception:
+            pass
+
+        exporter.session_info = session_info
+        exporter.set_preprocessing_config(preprocessing_config)
+        exporter.set_feature_names(feature_names)
+
+        # Hardware info
+        try:
+            from app.utils.hardware_detector import get_hardware_detector
+            hw = get_hardware_detector()
+            exporter.set_hardware_info(hw.format_info())
+        except Exception as e:
+            logger.debug(f"Hardware info collection failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Collect crystal link info (v2.0)
+        # ------------------------------------------------------------------
+        try:
+            parent = self._main_window
+            data_tab = getattr(parent, 'data_tab', None) if parent else None
+            dm = data_tab.get_data_manager() if data_tab else None
+            if dm and dm.crystal_features_active:
+                extractor = getattr(dm, '_crystal_extractor', None)
+                if extractor and extractor.link_report:
+                    report = extractor.link_report
+                    exporter.add_crystal_link_info(
+                        id_column=report.id_column,
+                        cif_folder=report.cif_folder,
+                        n_matched=report.n_matched,
+                        n_total=report.n_rows_total,
+                        crystal_features=report.crystal_features_added,
+                        composition_replaced=report.composition_features_replaced,
+                    )
+        except Exception as e:
+            logger.debug(f"Crystal link info collection failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Collect training results (sklearn models + NNs from trainer.results)
+        # v2.0: Separate NN results (is_neural_network=True) from sklearn
+        # results. NNs go to add_nn_training_result() with full architecture
+        # and history. Sklearn models go to add_training_results().
+        # This avoids duplicating NNs that also appear in nn_tab.nn_training_results.
+        # ------------------------------------------------------------------
+        # v2.0 FIX: Per-result error handling so one bad result doesn't
+        # destroy the entire export. The previous code had a single try/except
+        # around the whole loop — a TypeError (e.g., passing history_stats to
+        # add_nn_training_result which doesn't accept it) would silently drop
+        # ALL training results.
+        try:
+            trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
+        except Exception as e:
+            logger.warning(f"Could not get trainer: {e}")
+            trainer = None
+
+        if trainer and hasattr(trainer, 'results') and trainer.results:
+            sklearn_results = []
+            for result in trainer.results.values():
+                try:
+                    if getattr(result, 'is_neural_network', False):
+                        # v2.0: Read ALL NN data from immutable TrainingResult fields.
+                        # NO references to live nn_builder — completely robust.
+                        history = getattr(result, 'nn_history', {}) or {}
+                        if not history:
+                            continue
+
+                        cfg = dict(getattr(result, 'training_config', {}) or {})
+                        cfg['random_seed'] = getattr(result, 'random_state', 42)
+
+                        # Architecture from immutable fields (captured at training time)
+                        arch_desc = getattr(result, 'nn_architecture_desc', None) or 'Unknown'
+                        arch_detail = getattr(result, 'nn_architecture_detail', None) or {}
+
+                        # NOTE: add_nn_training_result() computes history_stats
+                        # internally — do NOT pass it as a parameter.
+                        # v2.0: Pass cv_metrics for per-fold breakdown in export.
+                        # v2.0: Pass optimization_time_sec for NN that was optimized.
+                        cv_metrics = getattr(result, 'cv_metrics', None)
+                        exporter.add_nn_training_result(
+                            model_name=result.model_name,
+                            architecture_desc=arch_desc,
+                            architecture_detail=arch_detail,
+                            history=history,
+                            training_config=cfg,
+                            metrics=getattr(result, 'metrics', None),
+                            training_time_sec=getattr(result, 'training_time', 0.0),
+                            cv_metrics=cv_metrics,
+                            optimization_time_sec=0.0,  # Will be populated below if NN was optimized
+                        )
+                    else:
+                        # Sklearn model
+                        sklearn_results.append(result)
+                except Exception as e:
+                    # Per-result error: log the specific model that failed
+                    # but continue processing the rest.
+                    model_name = getattr(result, 'model_name', 'Unknown')
+                    logger.error(
+                        f"Export collection FAILED for model '{model_name}': {e}",
+                        exc_info=True
+                    )
+            # Add sklearn models (if any were successfully collected)
+            if sklearn_results:
+                try:
+                    exporter.add_training_results(sklearn_results)
+                except Exception as e:
+                    logger.error(f"add_training_results failed: {e}", exc_info=True)
+
+        # v2.0: Post-process NN entries to add optimization_time from
+        # nn_optimizer_results. When a NN is optimized and then retrained,
+        # the optimization time is stored in nn_tab.nn_optimizer_results
+        # but NOT in the TrainingResult. We match by name and update.
+        try:
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
+            if nn_tab and hasattr(nn_tab, 'nn_optimizer_results') and nn_tab.nn_optimizer_results:
+                # Build lookup: algorithm name → optimization time
+                opt_times = {}
+                for opt_name, opt_result in nn_tab.nn_optimizer_results:
+                    if hasattr(opt_result, 'optimization_time'):
+                        opt_times[opt_name] = opt_result.optimization_time
+
+                # Update NN entries in exporter
+                if opt_times:
+                    for entry in exporter._entries:
+                        if entry.get('section') == 'Neural Network':
+                            model_name = entry.get('model_name', '')
+                            # Try exact match first
+                            if model_name in opt_times:
+                                entry['optimization_time_sec'] = round(float(opt_times[model_name]), 3)
+                            else:
+                                # Try base name match (e.g., "Neural Network_1" → "Neural Network")
+                                for opt_name, opt_time in opt_times.items():
+                                    if model_name.startswith(opt_name):
+                                        entry['optimization_time_sec'] = round(float(opt_time), 3)
+                                        break
+        except Exception as e:
+            logger.debug(f"NN optimization time post-processing failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Collect optimization results (with ALL trials + full config)
+        # ------------------------------------------------------------------
+        try:
+            opt_tab = _safe_get_parent_attr(self, 'optimization_tab')
+            if opt_tab and hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
+                for name, result in opt_tab.optimization_results:
+                    trials_df = None
+                    if hasattr(result, 'all_trials') and result.all_trials is not None:
+                        trials_df = result.all_trials
+                    elif hasattr(opt_tab, 'all_trial_results') and opt_tab.all_trial_results:
+                        trials_df = opt_tab.all_trial_results
+
+                    # v2.0 FIX: Read the ACTUAL optimization configuration from the
+                    # OptimizationResult (stored at optimization time) instead of
+                    # reading from the current GUI values. This ensures each
+                    # optimization shows its REAL config (cv_folds, random_state,
+                    # etc.) even when the user ran multiple optimizations with
+                    # different settings in the same session.
+                    opt_cfg = dict(getattr(result, 'optimization_config', {}) or {})
+                    # Fallback to algorithm name if not stored
+                    opt_cfg.setdefault('model_type', name)
+                    # Supplement with GUI values only for fields not in stored config
+                    if 'n_trials' not in opt_cfg and hasattr(opt_tab, 'trials_spin'):
+                        opt_cfg['n_trials'] = opt_tab.trials_spin.value()
+                    if 'cv_folds' not in opt_cfg and hasattr(opt_tab, 'cv_folds_spin'):
+                        opt_cfg['cv_folds'] = opt_tab.cv_folds_spin.value()
+                    if 'random_state' not in opt_cfg and hasattr(opt_tab, 'random_seed_spin'):
+                        opt_cfg['random_state'] = opt_tab.random_seed_spin.value()
+                    if 'timeout_sec' not in opt_cfg and hasattr(opt_tab, 'timeout_spin'):
+                        opt_cfg['timeout_sec'] = opt_tab.timeout_spin.value()
+
+                    # v2.0 FIX: getattr(..., lambda: None)() fails when the attr
+                    # exists but is a QSpinBox (not callable). Use direct access.
+                    timeout_val = None
+                    if hasattr(opt_tab, 'timeout_spin') and opt_tab.timeout_spin is not None:
+                        try:
+                            timeout_val = opt_tab.timeout_spin.value()
+                        except Exception:
+                            pass
+
+                    exporter.add_optimization_result(
+                        result, algorithm=name,
+                        n_trials=getattr(result, 'n_trials', 0),
+                        timeout=timeout_val,
+                        all_trials_df=trials_df,
+                        optimization_config=opt_cfg,
+                    )
+        except Exception as e:
+            logger.warning(f"Optimization results collection failed: {e}")
+
+        # NOTE: NN results are collected in the trainer.results loop above
+        # (v2.0: separated by is_neural_network flag). Do NOT duplicate here.
+
+        # ------------------------------------------------------------------
+        # v2.0: Collect NN optimization results
+        # ------------------------------------------------------------------
+        # NN optimizations are stored in nn_builder_tab.nn_optimizer_results,
+        # NOT in optimization_tab.optimization_results. They must be collected
+        # separately so they can be linked to their trained NN counterparts
+        # in _link_optimization_entries().
+        # The algorithm key 'Neural Network' normalizes to 'neural_network' in
+        # _opt_entries, which matches the base 'nn' from model names like
+        # 'NN_Optimized' (via the nn → neural_network mapping in
+        # _link_optimization_entries).
+        try:
+            nn_tab = _safe_get_parent_attr(self, 'nn_tab')
+            if nn_tab and hasattr(nn_tab, 'nn_optimizer_results') and nn_tab.nn_optimizer_results:
+                for opt_name, result in nn_tab.nn_optimizer_results:
+                    opt_cfg = dict(getattr(result, 'optimization_config', {}) or {})
+                    opt_cfg.setdefault('model_type', 'Neural Network')
+                    exporter.add_optimization_result(
+                        result, algorithm='Neural Network',
+                        n_trials=getattr(result, 'n_trials', 0),
+                        timeout=None,
+                        all_trials_df=getattr(result, 'all_trials', None),
+                        optimization_config=opt_cfg,
+                    )
+        except Exception as e:
+            logger.warning(f"NN optimization results collection failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Collect ensemble results (with weight optimization config)
+        # ------------------------------------------------------------------
+        try:
+            ens_tab = _safe_get_parent_attr(self, 'ensemble_tab')
+            if ens_tab and hasattr(ens_tab, 'get_ensemble_trainer'):
+                ens_trainer = ens_tab.get_ensemble_trainer()
+                if ens_trainer and hasattr(ens_trainer, 'results') and ens_trainer.results:
+                    for name, result in ens_trainer.results.items():
+                        # v1.5.0: Extract weight optimization configuration
+                        wopt_cfg = {}
+                        if hasattr(ens_tab, 'opt_trials_spin'):
+                            wopt_cfg['n_trials'] = ens_tab.opt_trials_spin.value()
+                        if hasattr(ens_tab, 'opt_cv_folds_spin'):
+                            wopt_cfg['cv_folds'] = ens_tab.opt_cv_folds_spin.value()
+                        if hasattr(ens_tab, 'opt_random_seed_spin'):
+                            wopt_cfg['random_state'] = ens_tab.opt_random_seed_spin.value()
+                        if hasattr(ens_tab, 'ensemble_type_combo'):
+                            wopt_cfg['ensemble_type'] = ens_tab.ensemble_type_combo.currentText()
+                        if hasattr(ens_tab, 'selected_models_list') and ens_tab.selected_models_list:
+                            wopt_cfg['base_models'] = [
+                                ens_tab.selected_models_list.item(i).text()
+                                for i in range(ens_tab.selected_models_list.count())
+                            ]
+
+                        exporter.add_ensemble_result(
+                            result,
+                            weight_optimization_config=wopt_cfg,
+                        )
+        except Exception as e:
+            logger.warning(f"Ensemble results collection failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Export
+        # ------------------------------------------------------------------
+        if not exporter._entries:
+            QMessageBox.warning(
+                self, "No Results",
+                "No results available to export.\n\n"
+                "Train at least one model before exporting the session report."
+            )
+            return
+
+        ext = fmt if fmt != "md" else "md"
+        default_name = f"autoaim_session_report.{ext}"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Export Session Report (.{fmt})",
+            default_name,
+            f"{fmt.upper()} Files (*.{ext});;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            written = exporter.export(file_path, fmt=fmt)
+            QMessageBox.information(
+                self, "Success",
+                f"Session report exported to:\n{written}\n\n"
+                f"Entries: {len(exporter._entries)} result(s)\n"
+                f"Features: {len(feature_names)}\n"
+                f"Preprocessing: {preprocessing_config}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error",
+                f"Failed to export session report:\n{str(e)}"
+            )

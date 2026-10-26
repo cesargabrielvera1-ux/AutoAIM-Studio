@@ -58,44 +58,63 @@ class MaterialsAwareValidator(LoggerMixin):
         Returns:
             CV splitter object
         """
-        if strategy == 'kfold':
-            return KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-        
-        elif strategy == 'stratified':
-            if y is None:
-                raise ValueError("Stratified CV requires target variable")
-            
-            # For regression, bin the target for stratification
-            if len(np.unique(y)) > 10:
-                y_binned = pd.qcut(y, q=min(10, len(y) // n_splits), labels=False, duplicates='drop')
-            else:
-                y_binned = y
-            
-            return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-        
-        elif strategy == 'loco':
-            if composition_column is None and groups is None:
-                raise ValueError("LOCO requires composition column or groups")
-            
-            if groups is None:
-                groups = self._create_chemical_system_groups(composition_column)
-            
-            return GroupKFold(n_splits=min(n_splits, len(np.unique(groups))))
-        
-        elif strategy == 'group':
-            if groups is None and composition_column is None:
-                raise ValueError("Group CV requires groups or composition column")
-            
-            if groups is None:
-                groups = self._create_chemical_system_groups(composition_column)
-            
-            return GroupKFold(n_splits=min(n_splits, len(np.unique(groups))))
-        
-        elif strategy == 'loo':
-            return LeaveOneOut()
-        
-        else:
+        from .cv_factory import CVConfig, build_cv_plan
+
+        # Legacy validations (messages preserved for backward compatibility).
+        if strategy == 'stratified' and y is None:
+            raise ValueError("Stratified CV requires target variable")
+        if strategy == 'loco' and composition_column is None and groups is None:
+            raise ValueError("LOCO requires composition column or groups")
+        if strategy == 'group' and groups is None and composition_column is None:
+            raise ValueError("Group CV requires groups or composition column")
+        if strategy not in self._strategies:
             raise ValueError(f"Unknown strategy: {strategy}")
+
+        # v2.0: Delegate splitter construction to the shared cv_factory. This
+        # fixes three latent defects of the previous implementation:
+        #   * 'stratified' now ACTUALLY stratifies a regression target by
+        #     quantile (previously it computed bins but discarded them,
+        #     returning a plain StratifiedKFold unable to stratify a
+        #     continuous y).
+        #   * 'loco' now uses LeaveOneGroupOut instead of silently clamping
+        #     n_splits to n_groups.
+        #   * group labels come from grouping.groups_from_chemical_system,
+        #     which reuses CompositionParser (no local regex).
+
+        # Resolve group labels for grouped strategies.
+        resolved_groups = groups
+        if strategy in ('group', 'loco') and resolved_groups is None:
+            resolved_groups = self._create_chemical_system_groups(composition_column)
+
+        factory_strategy = {
+            'kfold': 'kfold',
+            'stratified': 'stratified',
+            'group': 'group',
+            'loco': 'logo',   # leave-one-cluster-out == LeaveOneGroupOut
+            'loo': 'loo',
+        }[strategy]
+
+        # Representative X length (factory only needs len()).
+        if X is not None:
+            n = len(X)
+        elif y is not None:
+            n = len(y)
+        elif resolved_groups is not None:
+            n = len(resolved_groups)
+        else:
+            n = 0
+        X_arr = np.asarray(X) if X is not None else np.zeros((n, 1))
+        y_arr = np.asarray(y) if y is not None else np.zeros(n)
+
+        config = CVConfig(
+            strategy=factory_strategy,
+            n_folds=n_splits,
+            group_source='chemical_system' if resolved_groups is not None else None,
+            groups=(np.asarray(resolved_groups) if resolved_groups is not None else None),
+            random_state=random_state,
+        )
+        plan = build_cv_plan(config, X_arr, y_arr, problem_type='regression')
+        return plan.splitter
     
     def _create_chemical_system_groups(self, compositions: pd.Series) -> np.ndarray:
         """Create groups based on chemical systems.
@@ -106,21 +125,12 @@ class MaterialsAwareValidator(LoggerMixin):
         Returns:
             Array of group labels
         """
-        groups = []
-        
-        for formula in compositions:
-            # Parse formula to get elements
-            elements = self._parse_elements(formula)
-            
-            # Create group label from sorted elements
-            group_label = '-'.join(sorted(elements))
-            groups.append(group_label)
-        
-        # Convert to numeric labels
-        unique_groups = list(set(groups))
-        group_map = {g: i for i, g in enumerate(unique_groups)}
-        
-        return np.array([group_map[g] for g in groups])
+        from .grouping import groups_from_chemical_system
+        labels, _info = groups_from_chemical_system(compositions)
+        # Convert string labels to stable integer codes (legacy return type).
+        unique = list(dict.fromkeys(labels.tolist()))  # preserve first-seen order
+        mapping = {g: i for i, g in enumerate(unique)}
+        return np.array([mapping[g] for g in labels])
     
     def _parse_elements(self, formula: str) -> List[str]:
         """Parse elements from chemical formula.
@@ -133,22 +143,23 @@ Returns:
             List of element symbols
         """
         import re
-        
-        if not isinstance(formula, str):
+        from .feature_engineering import CompositionParser
+
+        if not isinstance(formula, str) or not formula.strip():
             return []
-        
-        # Simple regex to match element symbols
-        pattern = r'([A-Z][a-z]?)'
-        elements = re.findall(pattern, formula)
-        
-        # Remove duplicates while preserving order
+
+        # v2.0: validate against CompositionParser (single parsing source),
+        # then preserve the legacy first-seen ordering of element symbols.
+        frac = CompositionParser.parse_formula(formula)
+        order = re.findall(r'([A-Z][a-z]?)', formula)
+
         seen = set()
         unique_elements = []
-        for e in elements:
-            if e not in seen:
+        for e in order:
+            if e in frac and e not in seen:
                 seen.add(e)
                 unique_elements.append(e)
-        
+
         return unique_elements
     
     def recommend_strategy(
@@ -222,8 +233,13 @@ Returns:
         
         for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y, groups)):
             self.logger.info(f"Training fold {fold_idx + 1}/{n_splits}...")
-            
-            X_train, X_val = X[train_idx], X[val_idx]
+
+            # v2.0: X may be a DataFrame (from prepare_data). Use .iloc for
+            # positional indexing so integer train/val indices work correctly.
+            if hasattr(X, 'iloc'):
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            else:
+                X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             
             # Clone and train model

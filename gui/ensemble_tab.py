@@ -7,11 +7,14 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QTableWidget, QTableWidgetItem, QGroupBox,
     QTextEdit, QMessageBox, QProgressBar, QCheckBox, QSplitter,
     QListWidget, QListWidgetItem, QDialog, QDoubleSpinBox, QGridLayout,
-    QDialogButtonBox
+    QDialogButtonBox, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from ..core.ensemble_trainer import EnsembleTrainer, EnsembleResult
+from ..core.cv_factory import CVConfig, validate_cv_config, has_blocking_issue
+from ..core.grouping import GroupingError
+from .cv_config_widget import CVConfigWidget
 
 
 class EnsembleOptimizationThread(QThread):
@@ -20,7 +23,8 @@ class EnsembleOptimizationThread(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
     
-    def __init__(self, ensemble_trainer, X, y, model_names, n_trials=50, cv_folds=5, random_state=42):
+    def __init__(self, ensemble_trainer, X, y, model_names, n_trials=50, cv_folds=5,
+                 random_state=42, cv_config=None, cv_groups=None):
         super().__init__()
         self.ensemble_trainer = ensemble_trainer
         self.X = X
@@ -29,19 +33,24 @@ class EnsembleOptimizationThread(QThread):
         self.n_trials = n_trials
         self.cv_folds = cv_folds
         self.random_state = random_state
-    
+        # v2.0: full CV config + resolved group labels
+        self.cv_config = cv_config
+        self.cv_groups = cv_groups
+
     def run(self):
         try:
             def progress_callback(trial_num, score, weights):
                 self.progress.emit(trial_num, score, weights)
-            
+
             result = self.ensemble_trainer.optimize_weights(
                 self.X, self.y,
                 model_names=self.model_names,
                 n_trials=self.n_trials,
                 cv_folds=self.cv_folds,
                 random_state=self.random_state,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                cv_config=self.cv_config,
+                cv_groups=self.cv_groups,
             )
             self.finished.emit(result)
         except Exception as e:
@@ -55,7 +64,11 @@ class EnsembleTrainingThread(QThread):
     error = pyqtSignal(str)
     
     def __init__(self, ensemble_trainer, ensemble_type, model_names, X_train, y_train,
-                 X_test, y_test, cv_folds=5, random_state=42, weights=None):
+                 X_test, y_test, cv_folds=5, random_state=42, weights=None,
+                 X_external_val=None, y_external_val=None,
+                 cv_config=None, cv_groups=None,
+                 # v2.0: preprocessor for sklearn Pipeline (eliminates CV data leakage)
+                 preprocessor=None):
         super().__init__()
         self.ensemble_trainer = ensemble_trainer
         self.ensemble_type = ensemble_type
@@ -67,12 +80,20 @@ class EnsembleTrainingThread(QThread):
         self.cv_folds = cv_folds
         self.random_state = random_state
         self.weights = weights
-    
+        # v1.5.0: External validation for dual metrics
+        self.X_external_val = X_external_val
+        self.y_external_val = y_external_val
+        # v2.0: full CV config + resolved group labels
+        self.cv_config = cv_config
+        self.cv_groups = cv_groups
+        # v2.0: preprocessor passed through for Pipeline construction
+        self.preprocessor = preprocessor
+
     def run(self):
         try:
             def progress_callback(msg, progress):
                 self.progress.emit(msg, progress)
-            
+
             result = self.ensemble_trainer.train_ensemble(
                 self.ensemble_type,
                 self.model_names,
@@ -81,7 +102,12 @@ class EnsembleTrainingThread(QThread):
                 cv_folds=self.cv_folds,
                 random_state=self.random_state,
                 progress_callback=progress_callback,
-                weights=self.weights
+                weights=self.weights,
+                X_external_val=self.X_external_val,
+                y_external_val=self.y_external_val,
+                cv_config=self.cv_config,
+                cv_groups=self.cv_groups,
+                preprocessor=self.preprocessor,
             )
             self.finished.emit(result)
         except Exception as e:
@@ -93,7 +119,7 @@ class EnsembleTab(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self._main_window = parent  # v2.0 FIX: self._main_window overwrites PyQt parent()
         self.ensemble_trainer = None
         self._last_optimized_weights = None  # Store optimized weights for apply
         
@@ -121,6 +147,7 @@ class EnsembleTab(QWidget):
         
         # Refresh models button
         self.refresh_btn = QPushButton("Refresh Models List")
+        self.refresh_btn.setToolTip("Update the list with models trained in the Training and Optimization tabs")
         self.refresh_btn.clicked.connect(self._refresh_models)
         left_layout.addWidget(self.refresh_btn)
         
@@ -141,25 +168,26 @@ class EnsembleTab(QWidget):
         )
         config_layout.addWidget(self.ensemble_type_combo, 0, 1)
         
-        config_layout.addWidget(QLabel("CV Folds (Training):"), 1, 0)
-        self.cv_folds_spin = QSpinBox()
-        self.cv_folds_spin.setRange(1, 10)
-        self.cv_folds_spin.setValue(5)
-        self.cv_folds_spin.setToolTip(
-            "Cross-validation folds for training the ensemble. "
-            "Each base model is retrained on K different splits to generate "
-            "out-of-fold predictions for the ensemble."
-        )
-        config_layout.addWidget(self.cv_folds_spin, 1, 1)
-        
-        config_layout.addWidget(QLabel("Random Seed:"), 2, 0)
+        config_layout.addWidget(QLabel("Random Seed:"), 1, 0)
         self.random_seed_spin = QSpinBox()
         self.random_seed_spin.setRange(0, 9999)
         self.random_seed_spin.setValue(42)
         self.random_seed_spin.setToolTip("Random seed for reproducible ensemble training")
-        config_layout.addWidget(self.random_seed_spin, 2, 1)
-        
+        config_layout.addWidget(self.random_seed_spin, 1, 1)
+
         left_layout.addWidget(config_group)
+
+        # v2.0: Cross-validation configuration (shared widget). Ensembles now
+        # support the same five strategies as sklearn models and NNs.
+        cv_group = QGroupBox("Cross-Validation (Training)")
+        cv_group_layout = QVBoxLayout(cv_group)
+        cv_group_layout.setContentsMargins(4, 4, 4, 4)
+        self.cv_widget = CVConfigWidget()
+        # Backward-compatible alias: code reading self.cv_folds_spin.value()
+        # now reads the shared widget's folds spinner.
+        self.cv_folds_spin = self.cv_widget.folds_spin
+        cv_group_layout.addWidget(self.cv_widget)
+        left_layout.addWidget(cv_group)
         
         # v1.3.0: Manual Weights Configuration
         manual_group = QGroupBox("Manual Weights (Optional)")
@@ -185,6 +213,10 @@ class EnsembleTab(QWidget):
         manual_layout.addWidget(self.refresh_weights_btn)
         
         self.train_manual_btn = QPushButton("Train with Manual Weights")
+        self.train_manual_btn.setToolTip(
+            "Train the ensemble using weights you set above. "
+            "If no weights are set, all models get equal weight (1/N)."
+        )
         self.train_manual_btn.setStyleSheet("""
             QPushButton {
                 background-color: #E65100;
@@ -231,9 +263,36 @@ class EnsembleTab(QWidget):
         
         left_layout.addWidget(opt_group)
         
+        # v2.0: Search strategy info (Bayesian only for ensemble weights)
+        strategy_label = QLabel("Strategy: Bayesian (Optuna)")
+        strategy_label.setStyleSheet("color: #00bcd4; font-size: 8pt;")
+        strategy_label.setToolTip(
+            "Ensemble weight optimization uses Bayesian optimization only.\n"
+            "Grid Search is not available because weight spaces are continuous\n"
+            "with a sum-to-one constraint, which cannot be efficiently searched\n"
+            "with standard grid enumeration."
+        )
+        left_layout.addWidget(strategy_label)
+
+        # v2.0: Ensembles now support the full CV strategy set (see the
+        # Cross-Validation section above). Show a short pointer.
+        cv_label = QLabel("CV: see Cross-Validation section")
+        cv_label.setStyleSheet("color: #00bcd4; font-size: 8pt;")
+        cv_label.setToolTip(
+            "Ensembles now support the same cross-validation strategies as\n"
+            "sklearn models: K-Fold, Stratified (quantiles, with optional reserved\n"
+            "bin), Group K-Fold, LOO, and LOGO. Configure them in the\n"
+            "Cross-Validation section. Ensembles are most reliable with N ≥ 100."
+        )
+        left_layout.addWidget(cv_label)
+
         # Buttons
         self.optimize_weights_btn = QPushButton("Optimize Weights")
-        self.optimize_weights_btn.setStyleSheet("""
+        self.optimize_weights_btn.setToolTip(
+            "Use Bayesian optimization (Optuna) to find the best weights "
+            "for each model that maximize the ensemble's CV score."
+        )
+        self.optimize_weights_btn.setStyleSheet(""""
             QPushButton {
                 background-color: #1565C0;
                 color: white;
@@ -284,7 +343,17 @@ class EnsembleTab(QWidget):
         left_layout.addWidget(self.progress_text)
         
         left_layout.addStretch()
-        splitter.addWidget(left_widget)
+
+        # v2.0: Make the left (control) panel scrollable so all options —
+        # model list, config, manual weights, Cross-Validation, weight
+        # optimization and action buttons — stay reachable on typical laptop
+        # and desktop screens. Nothing is ever cut off (same pattern as the
+        # Neural Network tab).
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setWidget(left_widget)
+        splitter.addWidget(left_scroll)
         
         # Right panel - Results
         right_widget = QWidget()
@@ -321,13 +390,13 @@ class EnsembleTab(QWidget):
         """Refresh list of available models."""
         self.models_list.clear()
         
-        if self.parent is None:
+        if self._main_window is None:
             return
         
         # 1. Add trained models
-        if hasattr(self.parent, 'training_tab'):
+        if hasattr(self._main_window, 'training_tab'):
             try:
-                trainer = self.parent.training_tab.get_trainer()
+                trainer = self._main_window.training_tab.get_trainer()
                 if trainer and hasattr(trainer, 'results') and trainer.results:
                     for name, result in trainer.results.items():
                         if hasattr(result, 'model') and result.model is not None:
@@ -338,9 +407,9 @@ class EnsembleTab(QWidget):
                 print(f"Error loading trained models: {e}")
         
         # 2. Add optimized models
-        if hasattr(self.parent, 'optimization_tab'):
+        if hasattr(self._main_window, 'optimization_tab'):
             try:
-                opt_tab = self.parent.optimization_tab
+                opt_tab = self._main_window.optimization_tab
                 if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                     for model_name, opt_result in opt_tab.optimization_results:
                         if hasattr(opt_result, 'best_model') and opt_result.best_model is not None:
@@ -351,9 +420,9 @@ class EnsembleTab(QWidget):
                 print(f"Error loading optimized models: {e}")
         
         # 3. Add neural network models
-        if hasattr(self.parent, 'nn_tab'):
+        if hasattr(self._main_window, 'nn_tab'):
             try:
-                nn_tab = self.parent.nn_tab
+                nn_tab = self._main_window.nn_tab
                 if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                     for nn_name, nn_result in nn_tab.nn_training_results:
                         if hasattr(nn_result, 'model') and nn_result.model is not None:
@@ -413,12 +482,12 @@ class EnsembleTab(QWidget):
     
     def _train_with_manual_weights(self):
         """Train ensemble with manually configured weights."""
-        if self.parent is None or not hasattr(self.parent, 'data_tab'):
+        if self._main_window is None or not hasattr(self._main_window, 'data_tab'):
             QMessageBox.warning(self, "Warning", "No data available")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
-        trainer = self.parent.training_tab.get_trainer()
+        data_manager = self._main_window.data_tab.get_data_manager()
+        trainer = self._main_window.training_tab.get_trainer()
         
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
@@ -432,27 +501,49 @@ class EnsembleTab(QWidget):
         weights = self._get_manual_weights()
         
         try:
-            use_val = data_manager.validation_data is not None
-            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+            # v1.5.0: Always use internal test split; external validation is separate
+            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
+            val_arrays = data_manager.get_validation_arrays()
+            X_ext_val, y_ext_val = (val_arrays[0], val_arrays[1]) if val_arrays else (None, None)
             
             ensemble_type = self.ensemble_type_combo.currentText()
             cv_folds = self.cv_folds_spin.value()
-            
-            self.ensemble_trainer = EnsembleTrainer(trainer)
-            
+
+            # v2.0: validate CV strategy + resolve groups (shared rules). The
+            # CV fold shuffling is synced to the user's Random Seed.
+            _pt = self._get_problem_type(data_manager)
+            _cv = self._prepare_cv_config(data_manager, X_train, y_train, _pt,
+                                          random_state=self.random_seed_spin.value())
+            if _cv is None:
+                return
+            cv_config, cv_groups = _cv
+
             self.train_manual_btn.setEnabled(False)
             self.train_btn.setEnabled(False)
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
             self.progress_text.clear()
-            
+
             if weights:
                 self.progress_text.append("Training ensemble with manual weights:")
                 for name, w in weights.items():
                     self.progress_text.append(f"  {name}: {w:.4f}")
             else:
                 self.progress_text.append("Training ensemble with equal weights (no manual weights set)")
-            
+
+            # v2.0 FIX: Preserve existing ensemble results by reusing the
+            # ensemble_trainer instance. Creating a new EnsembleTrainer on
+            # every train call wiped the results dict, so only the most recent
+            # ensemble appeared in the Results tab.
+            if self.ensemble_trainer is None:
+                self.ensemble_trainer = EnsembleTrainer(trainer)
+            else:
+                # Refresh the wrapped trainer reference but keep the results dict
+                self.ensemble_trainer.trainer = trainer
+
+            # v2.0: Pass preprocessor for API consistency (ensemble reuses
+            # already-trained base models, so it is not used directly).
+            preprocessor = data_manager.get_preprocessor()
             self.training_thread = EnsembleTrainingThread(
                 self.ensemble_trainer,
                 ensemble_type,
@@ -461,7 +552,12 @@ class EnsembleTab(QWidget):
                 X_test, y_test,
                 cv_folds=cv_folds,
                 random_state=self.random_seed_spin.value(),
-                weights=weights
+                weights=weights,
+                X_external_val=X_ext_val,
+                y_external_val=y_ext_val,
+                cv_config=cv_config,
+                cv_groups=cv_groups,
+                preprocessor=preprocessor,
             )
             self.training_thread.progress.connect(self._on_training_progress)
             self.training_thread.finished.connect(self._on_training_finished)
@@ -473,6 +569,74 @@ class EnsembleTab(QWidget):
             self.train_manual_btn.setEnabled(True)
             self.train_btn.setEnabled(True)
     
+    def _get_problem_type(self, data_manager) -> str:
+        """Return 'classification' or 'regression' based on the loaded dataset."""
+        return 'classification' if getattr(data_manager, '_is_classification', False) else 'regression'
+
+    def _resolve_cv_groups(self, cv_config: CVConfig, data_manager,
+                           test_size: float, random_state: int) -> tuple:
+        """Resolve group labels for grouped CV, aligned to the training rows.
+
+        Returns (groups_train, group_info); both None for non-grouped strategies.
+        Raises GroupingError with a user-facing message on failure.
+        """
+        if cv_config.strategy not in ('group', 'logo'):
+            return None, None
+        groups_full, group_info = self.cv_widget.resolve_groups()
+        groups_train = data_manager.get_train_group_labels(
+            groups_full, test_size=test_size, random_state=random_state,
+        )
+        cv_config.groups = np.asarray(groups_train)
+        return groups_train, group_info
+
+    def _prepare_cv_config(self, data_manager, X_train, y_train, problem_type,
+                           n_folds_override=None, random_state=None):
+        """Set up the shared CV widget, validate the strategy, and resolve groups.
+
+        Returns (cv_config, cv_groups), or None if the user was blocked or
+        declined a warning. Centralizes the CV validation for both the regular
+        and the manual-weights ensemble training paths. ``n_folds_override`` lets
+        the weight-optimization path use its own fold count while sharing the
+        same strategy/groups. ``random_state`` syncs the CV fold shuffling with
+        the user's chosen seed (so the seed controls folds too, not just models).
+        """
+        self.cv_widget.set_dataframe(data_manager.data)
+        self.cv_widget.set_problem_type(problem_type)
+        try:
+            self.cv_widget.set_target_values(data_manager.data[data_manager.target_column].values)
+        except Exception:
+            self.cv_widget.set_target_values(None)
+        cv_config = self.cv_widget.get_config()
+        if n_folds_override is not None:
+            cv_config.n_folds = n_folds_override
+        if random_state is not None:
+            cv_config.random_state = random_state
+        # prepare_data(use_validation=False) uses default test_size=0.2, seed=42.
+        try:
+            cv_groups, group_info = self._resolve_cv_groups(
+                cv_config, data_manager, test_size=0.2, random_state=42)
+        except GroupingError as e:
+            QMessageBox.warning(self, "Grouping Error", str(e))
+            return None
+        _gi = group_info if cv_config.strategy in ('group', 'logo') else None
+        _issues = validate_cv_config(cv_config, len(X_train),
+                                     problem_type=problem_type, group_info=_gi,
+                                     y=y_train)
+        if has_blocking_issue(_issues):
+            QMessageBox.warning(self, "Cross-Validation Not Available",
+                                "\n\n".join(i['message'] for i in _issues if i['severity'] == 'block'))
+            return None
+        _warns = [i['message'] for i in _issues if i['severity'] == 'warn']
+        if _warns:
+            reply = QMessageBox.question(
+                self, "Cross-Validation Warning",
+                "\n\n".join(_warns) + "\n\nDo you want to proceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return None
+        return cv_config, cv_groups
+
     def _get_selected_models(self):
         """Get list of selected model names and their source info."""
         selected_names = []
@@ -489,12 +653,12 @@ class EnsembleTab(QWidget):
     
     def _train_ensemble(self):
         """Train the ensemble."""
-        if self.parent is None or not hasattr(self.parent, 'data_tab'):
+        if self._main_window is None or not hasattr(self._main_window, 'data_tab'):
             QMessageBox.warning(self, "Warning", "No data available")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
-        trainer = self.parent.training_tab.get_trainer()
+        data_manager = self._main_window.data_tab.get_data_manager()
+        trainer = self._main_window.training_tab.get_trainer()
         
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
@@ -506,20 +670,40 @@ class EnsembleTab(QWidget):
             return
         
         try:
-            use_val = data_manager.validation_data is not None
-            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+            # v1.5.0: Always use internal test split; external validation is separate
+            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
+            val_arrays = data_manager.get_validation_arrays()
+            X_ext_val, y_ext_val = (val_arrays[0], val_arrays[1]) if val_arrays else (None, None)
             
             ensemble_type = self.ensemble_type_combo.currentText()
             cv_folds = self.cv_folds_spin.value()
-            
-            # Create EnsembleTrainer with current trainer
-            self.ensemble_trainer = EnsembleTrainer(trainer)
-            
+
+            # v2.0: validate CV strategy + resolve groups (shared rules). The
+            # CV fold shuffling is synced to the user's Random Seed.
+            _pt = self._get_problem_type(data_manager)
+            _cv = self._prepare_cv_config(data_manager, X_train, y_train, _pt,
+                                          random_state=self.random_seed_spin.value())
+            if _cv is None:
+                return
+            cv_config, cv_groups = _cv
+
+            # v2.0 FIX: Preserve existing ensemble results by reusing the
+            # ensemble_trainer instance. Creating a new EnsembleTrainer on
+            # every train call wiped the results dict, so only the most recent
+            # ensemble appeared in the Results tab.
+            if self.ensemble_trainer is None:
+                self.ensemble_trainer = EnsembleTrainer(trainer)
+            else:
+                # Refresh the wrapped trainer reference but keep the results dict
+                self.ensemble_trainer.trainer = trainer
+
             self.train_btn.setEnabled(False)
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
             self.progress_text.clear()
-            
+
+            # v2.0: Pass preprocessor for API consistency.
+            preprocessor = data_manager.get_preprocessor()
             self.training_thread = EnsembleTrainingThread(
                 self.ensemble_trainer,
                 ensemble_type,
@@ -527,7 +711,12 @@ class EnsembleTab(QWidget):
                 X_train, y_train,
                 X_test, y_test,
                 cv_folds=cv_folds,
-                random_state=self.random_seed_spin.value()
+                random_state=self.random_seed_spin.value(),
+                X_external_val=X_ext_val,
+                y_external_val=y_ext_val,
+                cv_config=cv_config,
+                cv_groups=cv_groups,
+                preprocessor=preprocessor,
             )
             self.training_thread.progress.connect(self._on_training_progress)
             self.training_thread.finished.connect(self._on_training_finished)
@@ -540,12 +729,12 @@ class EnsembleTab(QWidget):
     
     def _optimize_weights(self):
         """Optimize ensemble weights using Bayesian optimization."""
-        if self.parent is None or not hasattr(self.parent, 'data_tab'):
+        if self._main_window is None or not hasattr(self._main_window, 'data_tab'):
             QMessageBox.warning(self, "Warning", "No data available")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
-        trainer = self.parent.training_tab.get_trainer()
+        data_manager = self._main_window.data_tab.get_data_manager()
+        trainer = self._main_window.training_tab.get_trainer()
         
         if data_manager is None or data_manager.data is None:
             QMessageBox.warning(self, "Warning", "No data loaded!")
@@ -557,29 +746,48 @@ class EnsembleTab(QWidget):
             return
         
         try:
-            use_val = data_manager.validation_data is not None
-            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+            # v1.5.0: Use internal test split for weight optimization
+            X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
             
             n_trials = self.opt_trials_spin.value()
             cv_folds = self.opt_cv_folds_spin.value()
-            
-            # Create EnsembleTrainer with current trainer
-            self.ensemble_trainer = EnsembleTrainer(trainer)
-            
+
+            # v2.0: weight optimization shares the training CV strategy/groups,
+            # but uses its own fold count (opt_cv_folds_spin).
+            _pt = self._get_problem_type(data_manager)
+            _cv = self._prepare_cv_config(data_manager, X_train, y_train, _pt,
+                                          n_folds_override=cv_folds,
+                                          random_state=self.opt_random_seed_spin.value())
+            if _cv is None:
+                return
+            cv_config, cv_groups = _cv
+
+            # v2.0 FIX: Preserve existing ensemble results by reusing the
+            # ensemble_trainer instance. Creating a new EnsembleTrainer on
+            # every optimize call wiped the results dict, so only the most recent
+            # ensemble appeared in the Results tab.
+            if self.ensemble_trainer is None:
+                self.ensemble_trainer = EnsembleTrainer(trainer)
+            else:
+                # Refresh the wrapped trainer reference but keep the results dict
+                self.ensemble_trainer.trainer = trainer
+
             self.optimize_weights_btn.setEnabled(False)
             self.train_btn.setEnabled(True)
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
             self.progress_text.clear()
             self.progress_text.append("Starting weight optimization...")
-            
+
             self.opt_thread = EnsembleOptimizationThread(
                 self.ensemble_trainer,
                 X_train, y_train,
                 model_names=selected_models,
                 n_trials=n_trials,
                 cv_folds=cv_folds,
-                random_state=self.opt_random_seed_spin.value()
+                random_state=self.opt_random_seed_spin.value(),
+                cv_config=cv_config,
+                cv_groups=cv_groups,
             )
             self.opt_thread.progress.connect(self._on_optimization_progress)
             self.opt_thread.finished.connect(self._on_optimization_finished)

@@ -14,7 +14,9 @@ class ModelConfig:
     random_state: int = 42
     test_size: float = 0.2
     cv_folds: int = 5
-    n_jobs: int = -1
+    # v2.0: Default was -1 (all cores). Now 0 means "use model's default"
+    # which comes from model_registry with hardware-aware recommended_n_jobs.
+    n_jobs: int = 0
     early_stopping_rounds: int = 50
 
 
@@ -45,7 +47,7 @@ class AppConfig:
     """Main application configuration."""
     app_name: str = "AutoAIM Studio"
     full_name: str = "Auto Artificial Intelligence for Materials Studio"
-    version: str = "1.4.0"
+    version: str = "2.0.0"
     theme: str = "dark"
     auto_save: bool = True
     auto_save_interval: int = 300

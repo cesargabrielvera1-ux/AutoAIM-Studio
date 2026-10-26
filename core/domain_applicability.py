@@ -14,6 +14,7 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 from ..utils.logger import LoggerMixin
+from ..utils.hardware_detector import get_hardware_detector
 
 
 @dataclass
@@ -68,10 +69,15 @@ class DomainApplicabilityAnalyzer(LoggerMixin):
         self._nn_model.fit(X_pca)
         
         # Fit Isolation Forest
+        # v2.0: Use recommended_n_jobs instead of -1 to leave one core for OS
+        try:
+            iso_n_jobs = get_hardware_detector().info.recommended_n_jobs
+        except Exception:
+            iso_n_jobs = max(1, ( __import__('os').cpu_count() or 4) - 1)
         self._iso_forest = IsolationForest(
             contamination=0.1,
             random_state=42,
-            n_jobs=-1
+            n_jobs=iso_n_jobs
         )
         self._iso_forest.fit(X_pca)
         

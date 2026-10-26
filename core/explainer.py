@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from sklearn.inspection import permutation_importance, partial_dependence
 
 from ..utils.logger import LoggerMixin
+from ..utils.hardware_detector import get_hardware_detector
 
 
 class ModelExplainer(LoggerMixin):
@@ -24,9 +25,64 @@ class ModelExplainer(LoggerMixin):
         self._feature_names = None
         self._background_data = None
     
+    @staticmethod
+    def _get_explainer_n_jobs(model: Any) -> int:
+        """v2.0: Determine safe n_jobs for permutation_importance.
+
+        Strategy — parallelize permutation_importance when safe, never when not:
+
+        1. PyInstaller frozen Windows → ALWAYS n_jobs=1 (joblib multiprocessing
+           re-imports main module, spawning duplicate app windows).
+        2. Model has internal multi-core parallelism (RF, XGB, LGBM, HistGB,
+           CatBoost, etc.) → n_jobs=1 (avoid oversubscription).
+        3. Model is single-threaded (SVR, Ridge, KNN with n_jobs=1, etc.)
+           → n_jobs=-1 (use all cores, model won't fight for them).
+
+        Detection for #2 checks BOTH the n_jobs/nthread parameter AND the
+        model class name, because some models (HistGradientBoosting) use
+        OpenMP internally without exposing an n_jobs parameter.
+        """
+        import sys
+        # 1. PyInstaller frozen Windows: NEVER use multiprocessing
+        if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+            return 1
+
+        cls_name = model.__class__.__name__
+
+        # 2. Detect models with internal multi-core parallelism
+        # These models already saturate CPU cores — adding joblib processes
+        # on top causes oversubscription (slower + unreliable results).
+        _MULTI_THREADED_CLASSES = (
+            'RandomForest', 'ExtraTrees', 'GradientBoosting',
+            'HistGradientBoosting', 'AdaBoost', 'Bagging', 'Stacking',
+            'XGBRegressor', 'XGBClassifier', 'XGB', 'LGBM',
+            'CatBoostRegressor', 'CatBoostClassifier', 'CatBoost',
+        )
+        is_multithreaded = any(t in cls_name for t in _MULTI_THREADED_CLASSES)
+
+        # Also check n_jobs/nthread param if model has get_params
+        if not is_multithreaded and hasattr(model, 'get_params'):
+            try:
+                params = model.get_params()
+                model_n_jobs = params.get('n_jobs', params.get('thread_count', 1))
+                if isinstance(model_n_jobs, int) and (model_n_jobs > 1 or model_n_jobs == -1):
+                    is_multithreaded = True
+            except Exception:
+                pass
+
+        if is_multithreaded:
+            return 1  # Don't oversubscribe
+
+        # 3. Single-threaded model — safe to parallelize permutation
+        try:
+            return get_hardware_detector().info.recommended_n_jobs
+        except Exception:
+            import os
+            return max(1, (os.cpu_count() or 4) - 1)
+
     def set_model(self, model: Any, model_name: str = "model") -> None:
         """Set the model to explain.
-        
+
         Args:
             model: Trained model
             model_name: Name of the model
@@ -65,6 +121,102 @@ class ModelExplainer(LoggerMixin):
         
         return result.get('shap_values', np.array([]))
     
+    def _compute_shap_with_best_explainer(
+        self,
+        model: Any,
+        X_sample: np.ndarray,
+        background_data: Optional[np.ndarray] = None
+    ) -> tuple:
+        """Select the best SHAP explainer for the model type and compute values.
+
+        v2.0: Architecture — always use the specialized explainer for each model
+        family. KernelExplainer is the absolute last resort.
+
+        Returns (shap_values, explainer_instance) or raises Exception.
+        """
+        import shap
+
+        # v2.0: Conditionally import torch — may not be available in all envs
+        try:
+            import torch
+            _torch_available = True
+        except ImportError:
+            _torch_available = False
+            torch = None  # type: ignore[assignment]
+
+        cls_name = model.__class__.__name__
+        module_name = model.__class__.__module__ if hasattr(model, '__class__') else ''
+
+        # v2.0: If model is a sklearn Pipeline, drill into the last step (the
+        # actual estimator) for explainer selection. SHAP explainers need the
+        # real model, not the Pipeline wrapper. We keep the original Pipeline
+        # for prediction but use the inner estimator for SHAP type detection.
+        _shap_model = model
+        if hasattr(model, 'named_steps') and model.named_steps:
+            _shap_model = list(model.named_steps.values())[-1]
+            _shap_cls_name = _shap_model.__class__.__name__
+            _shap_module_name = _shap_model.__class__.__module__
+        else:
+            _shap_cls_name = cls_name
+            _shap_module_name = module_name
+
+        # --- 1. Neural Networks (PyTorch) → DeepExplainer ---
+        if _torch_available and torch is not None and isinstance(_shap_model, torch.nn.Module):
+            self.logger.info("Using DeepExplainer for PyTorch Neural Network")
+            _shap_model.eval()  # Ensure eval mode
+            # DeepExplainer expects torch Tensors
+            # v2.0 FIX: np.asarray() ensures DataFrames/Series are converted to numpy
+            # arrays before torch.FloatTensor, which cannot infer shape from pandas objects.
+            X_tensor = torch.FloatTensor(np.asarray(X_sample))
+            bg = background_data if background_data is not None else X_sample[:min(10, len(X_sample))]
+            bg_tensor = torch.FloatTensor(np.asarray(bg))
+            explainer = shap.DeepExplainer(_shap_model, bg_tensor)
+            shap_values = explainer.shap_values(X_tensor)
+            return shap_values, explainer
+
+        # --- 2. Tree-based models → TreeExplainer (exact, fast) ---
+        tree_model_names = (
+            'HistGradientBoosting', 'GradientBoosting', 'RandomForest',
+            'ExtraTrees', 'DecisionTree', 'XGB', 'LGBM', 'CatBoost',
+            'AdaBoost', 'Bagging'
+        )
+        is_tree = (
+            hasattr(_shap_model, 'feature_importances_')
+            or any(t in _shap_cls_name for t in tree_model_names)
+            or 'sklearn.tree' in _shap_module_name
+            or 'sklearn.ensemble' in _shap_module_name
+        )
+        if is_tree:
+            self.logger.info(f"Using TreeExplainer for {_shap_cls_name}")
+            explainer = shap.TreeExplainer(_shap_model)
+            shap_values = explainer.shap_values(X_sample)
+            return shap_values, explainer
+
+        # --- 3. Linear models → LinearExplainer ---
+        is_linear = (
+            hasattr(_shap_model, 'coef_')
+            or any(t in _shap_cls_name for t in ('Ridge', 'Lasso', 'ElasticNet',
+                                                    'LinearRegression', 'LogisticRegression',
+                                                    'LinearSVC', 'LinearSVR', 'SGD'))
+            or 'linear_model' in _shap_module_name
+        )
+        if is_linear:
+            self.logger.info(f"Using LinearExplainer for {_shap_cls_name}")
+            bg = background_data if background_data is not None else X_sample
+            explainer = shap.LinearExplainer(_shap_model, bg)
+            shap_values = explainer.shap_values(X_sample)
+            return shap_values, explainer
+
+        # --- 4. Fallback → KernelExplainer (slow, approximate) ---
+        self.logger.warning(
+            f"No specialized explainer for {_shap_cls_name} — falling back to KernelExplainer. "
+            "This will be slow and results may vary between runs."
+        )
+        bg = background_data if background_data is not None else X_sample[:min(10, len(X_sample))]
+        explainer = shap.KernelExplainer(_shap_model.predict, bg)
+        shap_values = explainer.shap_values(X_sample, nsamples=100)
+        return shap_values, explainer
+
     def compute_shap_values(
         self,
         model: Any,
@@ -90,11 +242,17 @@ class ModelExplainer(LoggerMixin):
         except ImportError:
             self.logger.warning("SHAP not available. Install with: pip install shap")
             return {}
-        
+
+        # v2.0: Convert DataFrames/Series to numpy arrays for SHAP compatibility.
+        if hasattr(X, 'values'):
+            X = X.values
+        if background_data is not None and hasattr(background_data, 'values'):
+            background_data = background_data.values
+
         # SIMPLIFICADO: Usar nombres basados en X.shape[1]
         n_features = X.shape[1]
         self._feature_names = feature_names[:n_features] if feature_names and len(feature_names) >= n_features else [f"feature_{i}" for i in range(n_features)]
-        
+
         # Sample data if too large
         if len(X) > sample_size:
             indices = np.random.choice(len(X), sample_size, replace=False)
@@ -102,28 +260,12 @@ class ModelExplainer(LoggerMixin):
         else:
             X_sample = X
         
-        # Create explainer based on model type
+        # v2.0: Use the best specialized explainer for each model family
         try:
-            # Tree-based models (CatBoost sometimes fails with TreeExplainer, so we try/except)
-            if hasattr(model, 'feature_importances_') or 'XGB' in model.__class__.__name__ or 'LGBM' in model.__class__.__name__:
-                try:
-                    self._explainer = shap.TreeExplainer(model)
-                    self._shap_values = self._explainer.shap_values(X_sample)
-                except Exception as e:
-                    self.logger.warning(f"TreeExplainer failed ({e}), falling back to KernelExplainer")
-                    bg_data = background_data if background_data is not None else X_sample[:min(10, len(X_sample))]
-                    self._explainer = shap.KernelExplainer(model.predict, bg_data)
-                    self._shap_values = self._explainer.shap_values(X_sample, nsamples=100)
-            # Linear models
-            elif hasattr(model, 'coef_'):
-                self._explainer = shap.LinearExplainer(model, background_data if background_data is not None else X_sample)
-                self._shap_values = self._explainer.shap_values(X_sample)
-            # For NN and other models, use KernelExplainer (universal)
-            else:
-                bg_data = background_data if background_data is not None else X_sample[:min(10, len(X_sample))]
-                self._explainer = shap.KernelExplainer(model.predict, bg_data)
-                self._shap_values = self._explainer.shap_values(X_sample, nsamples=100)
-            
+            self._shap_values, self._explainer = self._compute_shap_with_best_explainer(
+                model, X_sample, background_data
+            )
+
             # Handle multi-output
             if isinstance(self._shap_values, list):
                 # For classification, use values for predicted class
@@ -172,12 +314,14 @@ class ModelExplainer(LoggerMixin):
             else:
                 scoring = 'r2'
             
+            # v2.0: Use model-aware n_jobs to avoid oversubscription
+            explainer_n_jobs = self._get_explainer_n_jobs(model)
             result = permutation_importance(
                 model, X, y,
                 n_repeats=n_repeats,
                 random_state=random_state,
                 scoring=scoring,
-                n_jobs=n_jobs
+                n_jobs=explainer_n_jobs
             )
             
             importance_dict = {
@@ -280,7 +424,7 @@ class ModelExplainer(LoggerMixin):
         # Crear DataFrame base con los nombres de features
         df = pd.DataFrame({'feature': self._feature_names})
         
-        # Model-specific importance (asegurar longitud correcta)
+        # --- 1. Model-specific importance (built-in) ---
         if hasattr(model, 'feature_importances_'):
             imp = np.array(model.feature_importances_)
             if len(imp) == n_features:
@@ -292,45 +436,53 @@ class ModelExplainer(LoggerMixin):
             coef = np.array(coef)
             if len(coef) == n_features:
                 df['model_importance'] = np.abs(coef)
+        # v2.0 FIX: For models WITHOUT built-in feature importance
+        # (e.g., HistGradientBoosting, which has NO feature_importances_),
+        # compute a surrogate using permutation importance so it acts as the
+        # 'model_importance' column that the GUI expects.
+        else:
+            try:
+                self.logger.info(
+                    f"Model {model.__class__.__name__} has no built-in feature "
+                    f"importance — computing surrogate via permutation."
+                )
+                # Use _get_explainer_n_jobs: single-threaded models get n_jobs=-1
+                # (fast), multi-threaded models get n_jobs=1 (no oversubscription).
+                surr_njobs = self._get_explainer_n_jobs(model)
+                surr = permutation_importance(
+                    model, X, y, n_repeats=3, random_state=random_state,
+                    n_jobs=surr_njobs
+                )
+                if len(surr.importances_mean) == n_features:
+                    df['model_importance'] = surr.importances_mean
+            except Exception as e:
+                self.logger.warning(f"Surrogate feature importance failed: {e}")
         
-        # Permutation importance (funciona para todos los modelos con .predict())
+        # --- 2. Permutation importance (full, robust) ---
         try:
-            perm_result = permutation_importance(model, X, y, n_repeats=5, random_state=random_state, n_jobs=1)
+            # v2.0: Use _get_explainer_n_jobs for smart parallelization.
+            # Single-threaded models (SVR, Ridge) get n_jobs=-1 → FAST.
+            # Multi-threaded models (RF, XGB, LGBM, HistGB) get n_jobs=1
+            # → no oversubscription. The n_repeats param provides variance.
+            explainer_n_jobs = self._get_explainer_n_jobs(model)
+            perm_result = permutation_importance(
+                model, X, y, n_repeats=5, random_state=random_state,
+                n_jobs=explainer_n_jobs
+            )
             if len(perm_result.importances_mean) == n_features:
                 df['permutation_importance'] = perm_result.importances_mean
         except Exception as e:
             self.logger.warning(f"Permutation importance failed: {e}")
         
-        # SHAP importance
+        # --- 3. SHAP importance ---
         try:
-            import shap
-            
             X_sample = X[:min(100, len(X))]
-            
-            # Detectar tipo de modelo
-            is_tree_model = hasattr(model, 'feature_importances_') or 'XGB' in model.__class__.__name__ or 'LGBM' in model.__class__.__name__
-            is_linear_model = hasattr(model, 'coef_')
-            
-            if is_tree_model:
-                try:
-                    explainer = shap.TreeExplainer(model)
-                    shap_values = explainer.shap_values(X_sample)
-                except Exception as e:
-                    self.logger.warning(f"TreeExplainer failed ({e}), falling back to KernelExplainer")
-                    explainer = shap.KernelExplainer(model.predict, X_sample)
-                    shap_values = explainer.shap_values(X_sample, nsamples=100)
-            elif is_linear_model:
-                explainer = shap.LinearExplainer(model, X_sample)
-                shap_values = explainer.shap_values(X_sample)
-            else:
-                # Para NN y otros modelos, usar KernelExplainer (más lento pero universal)
-                explainer = shap.KernelExplainer(model.predict, X_sample)
-                shap_values = explainer.shap_values(X_sample, nsamples=100)
-            
+            shap_values, _ = self._compute_shap_with_best_explainer(
+                model, X_sample, background_data=X_sample
+            )
             # Handle multi-output (para clasificación)
             if isinstance(shap_values, list):
                 shap_values = shap_values[0] if len(shap_values) > 0 else shap_values
-            
             shap_imp = np.abs(shap_values).mean(axis=0)
             if len(shap_imp) == n_features:
                 df['shap_importance'] = shap_imp
@@ -357,6 +509,9 @@ class ModelExplainer(LoggerMixin):
         feature_names: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Explain a single prediction."""
+        # v2.0: Convert DataFrames/Series to numpy arrays.
+        if hasattr(X_instance, 'values'):
+            X_instance = X_instance.values
         # Ensure 2D
         if X_instance.ndim == 1:
             X_instance = X_instance.reshape(1, -1)

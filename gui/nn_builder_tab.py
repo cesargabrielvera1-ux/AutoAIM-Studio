@@ -7,22 +7,66 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QDoubleSpinBox, QGroupBox,
     QCheckBox, QTextEdit, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QSplitter, QListWidget,
-    QGridLayout, QFrame, QScrollArea, QDialog, QDialogButtonBox
+    QGridLayout, QFrame, QScrollArea, QDialog, QDialogButtonBox,
+    QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from ..core.nn_builder import NeuralNetworkBuilder, ActivationFunction
 from ..core.optimizer import HyperparameterOptimizer
+from ..core.cv_factory import CVConfig, validate_cv_config, has_blocking_issue
+from ..core.grouping import GroupingError
+from .cv_config_widget import CVConfigWidget
 
 logger = logging.getLogger(__name__)
 
 
 def _safe_get_parent_attr(widget, attr_path, default=None):
-    """Safely get a nested attribute from widget.parent."""
-    if widget is None or not hasattr(widget, 'parent') or widget.parent is None:
+    """Safely get a nested attribute from the widget's main window.
+    
+    v2.0 FIX: After addTab(), widget.parent() returns the QTabWidget — NOT
+    the MainWindow. We first try the _main_window reference stored during
+    __init__, then fall back to walking the entire parent chain until we find
+    an object that has the first attribute in attr_path.
+    """
+    if widget is None:
         return default
+    
     parts = attr_path.split('.')
-    obj = widget.parent
+    first_attr = parts[0]
+    
+    # v2.0: Strategy 1 — use the _main_window reference stored in __init__
+    # before addTab() reparented the widget.
+    obj = getattr(widget, '_main_window', None)
+    if obj is not None and hasattr(obj, first_attr):
+        pass  # Fast path: _main_window has the attribute
+    else:
+        # Strategy 2 — walk the full parent chain looking for an object
+        # that has the first attribute. This covers addTab() reparenting.
+        try:
+            current = widget.parent()
+        except (TypeError, AttributeError):
+            return default
+        
+        obj = None
+        visited = set()  # Guard against circular references
+        while current is not None:
+            obj_id = id(current)
+            if obj_id in visited:
+                break
+            visited.add(obj_id)
+            if hasattr(current, first_attr):
+                obj = current
+                break
+            try:
+                current = current.parent()
+            except (TypeError, AttributeError):
+                break
+        
+        if obj is None:
+            return default
+    
+    # Traverse the rest of the attribute path
     try:
         for part in parts:
             if part.endswith('()'):
@@ -261,7 +305,7 @@ class NNBuilderTab(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self._main_window = parent  # v2.0 FIX: self.parent overwrites PyQt parent()
         self.nn_builder = NeuralNetworkBuilder()
         self.layer_configs = []
         
@@ -299,6 +343,7 @@ class NNBuilderTab(QWidget):
         layer_controls.addWidget(QLabel("Units:"))
         self.units_spin = QSpinBox()
         self.units_spin.setRange(1, 2048)
+        self.units_spin.setToolTip("Number of neurons in this hidden layer. Start with 32-128 and decrease in deeper layers.")
         self.units_spin.setValue(128)
         self.units_spin.setToolTip(
             "Number of neurons in this layer. More neurons = higher capacity to learn "
@@ -308,6 +353,7 @@ class NNBuilderTab(QWidget):
         
         layer_controls.addWidget(QLabel("Activation:"))
         self.activation_combo = QComboBox()
+        self.activation_combo.setToolTip("Activation function: relu (fast, default), tanh (smooth gradients), gelu (modern, often better), swish (self-gated)")
         self.activation_combo.addItems(['relu', 'leaky_relu', 'tanh', 'gelu', 'sigmoid', 'elu'])
         self.activation_combo.setToolTip(
             "Non-linear function applied to each neuron's output. "
@@ -335,6 +381,7 @@ class NNBuilderTab(QWidget):
         # Batch norm and layer norm
         norm_layout = QHBoxLayout()
         self.batch_norm_check = QCheckBox("Batch Normalization")
+        self.batch_norm_check.setToolTip("Normalizes layer inputs during training. Speeds up convergence and reduces sensitivity to initialization. Recommended.")
         self.batch_norm_check.setChecked(True)
         self.batch_norm_check.setToolTip(
             "Normalizes layer inputs across the batch. Speeds up training, "
@@ -354,6 +401,7 @@ class NNBuilderTab(QWidget):
         
         # Add layer button
         self.add_layer_btn = QPushButton("Add Layer")
+        self.add_layer_btn.setToolTip("Add a hidden layer to the neural network. Start with 1-2 layers for most problems.")
         self.add_layer_btn.clicked.connect(self._add_layer)
         arch_layout.addWidget(self.add_layer_btn)
         
@@ -363,6 +411,7 @@ class NNBuilderTab(QWidget):
         
         # Remove layer button
         self.remove_layer_btn = QPushButton("Remove Selected Layer")
+        self.remove_layer_btn.setToolTip("Remove the currently selected hidden layer from the architecture.")
         self.remove_layer_btn.clicked.connect(self._remove_layer)
         arch_layout.addWidget(self.remove_layer_btn)
         
@@ -444,18 +493,9 @@ class NNBuilderTab(QWidget):
         )
         train_layout.addWidget(self.patience_spin, 2, 3)
         
-        # Row 3: CV Folds + Random Seed
-        train_layout.addWidget(QLabel("CV Folds:"), 3, 0)
-        self.cv_folds_spin = QSpinBox()
-        self.cv_folds_spin.setRange(1, 10)
-        self.cv_folds_spin.setValue(5)
-        self.cv_folds_spin.setToolTip(
-            "K-fold cross-validation. Network trained K times on different splits. "
-            "Higher = more reliable performance estimate but Kx slower."
-        )
-        train_layout.addWidget(self.cv_folds_spin, 3, 1)
-        
-        train_layout.addWidget(QLabel("Random Seed:"), 3, 2)
+        # Row 3: Random Seed (CV Folds now lives in the Cross-Validation section
+        # via the shared CVConfigWidget; we alias it below for compatibility).
+        train_layout.addWidget(QLabel("Random Seed:"), 3, 0)
         self.random_seed_spin = QSpinBox()
         self.random_seed_spin.setRange(0, 9999)
         self.random_seed_spin.setValue(42)
@@ -463,7 +503,7 @@ class NNBuilderTab(QWidget):
             "Random seed for reproducible NN training. "
             "Same seed = same weight initialization and data shuffling."
         )
-        train_layout.addWidget(self.random_seed_spin, 3, 3)
+        train_layout.addWidget(self.random_seed_spin, 3, 1)
         
         # v1.3.0: Row 4: LR Scheduler + Early Stopping Min Delta
         train_layout.addWidget(QLabel("Scheduler:"), 4, 0)
@@ -505,7 +545,21 @@ class NNBuilderTab(QWidget):
         train_layout.addWidget(self.grad_clip_spin, 5, 1)
         
         left_layout.addWidget(train_group)
-        
+
+        # v2.0: Cross-validation configuration (shared widget). NNs now support
+        # the same five strategies as sklearn models. Kept compact; the left
+        # panel is scrollable so nothing is lost on smaller screens.
+        cv_group = QGroupBox("Cross-Validation")
+        cv_group_layout = QVBoxLayout(cv_group)
+        cv_group_layout.setContentsMargins(4, 4, 4, 4)
+        self.cv_widget = CVConfigWidget()
+        self.cv_widget.set_problem_type(self._get_problem_type())
+        # Backward-compatible alias: code that reads self.cv_folds_spin.value()
+        # now reads the shared widget's folds spinner.
+        self.cv_folds_spin = self.cv_widget.folds_spin
+        cv_group_layout.addWidget(self.cv_widget)
+        left_layout.addWidget(cv_group)
+
         # Hyperparameter Optimization (compact layout)
         opt_group = QGroupBox("Hyperparameter Optimization")
         opt_layout = QGridLayout(opt_group)
@@ -604,19 +658,48 @@ class NNBuilderTab(QWidget):
         actions_layout = QGridLayout(actions_group)
         actions_layout.setSpacing(4)
         
+        # v2.0: Info row — strategy and CV labels (compact, non-overlapping)
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(8)
+        strategy_label = QLabel("Strategy: Bayesian (Optuna)")
+        strategy_label.setStyleSheet("color: #00bcd4; font-size: 8pt;")
+        strategy_label.setToolTip(
+            "Neural Network architecture search uses Bayesian optimization only.\n"
+            "Grid Search is not available because NN hyperparameter spaces are\n"
+            "non-rectangular (variable architecture sizes) and require gradient-based\n"
+            "training that cannot be evaluated with standard GridSearchCV."
+        )
+        info_layout.addWidget(strategy_label)
+
+        # v2.0: NNs now support the full CV strategy set (see the Cross-Validation
+        # section above). Show a short pointer instead of the old "K-Fold only".
+        cv_label = QLabel("CV: see Cross-Validation section")
+        cv_label.setStyleSheet("color: #00bcd4; font-size: 8pt;")
+        cv_label.setToolTip(
+            "Neural Networks now support the same cross-validation strategies as\n"
+            "sklearn models: K-Fold, Stratified (quantiles, with optional reserved\n"
+            "bin), Group K-Fold, LOO, and LOGO. Configure them in the\n"
+            "Cross-Validation section above. Note: LOO/LOGO train one network per\n"
+            "sample/group — expensive for NNs; use them only on small datasets."
+        )
+        info_layout.addWidget(cv_label)
+        info_layout.addStretch()
+        actions_layout.addLayout(info_layout, 0, 0, 1, 3)
+
+        # Buttons row
         self.optimize_btn = QPushButton("Auto-Optimize")
         self.optimize_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1565C0;
                 color: white;
                 font-weight: bold;
-                padding: 8px;
+                padding: 6px;
                 font-size: 9pt;
             }
         """)
         self.optimize_btn.setToolTip("Bayesian optimization of NN hyperparameters")
         self.optimize_btn.clicked.connect(self._optimize_hyperparameters)
-        actions_layout.addWidget(self.optimize_btn, 0, 0)
+        actions_layout.addWidget(self.optimize_btn, 1, 0)
         
         self.apply_best_params_btn = QPushButton("Apply Best")
         self.apply_best_params_btn.setStyleSheet("""
@@ -624,7 +707,7 @@ class NNBuilderTab(QWidget):
                 background-color: #4A148C;
                 color: white;
                 font-weight: bold;
-                padding: 8px;
+                padding: 6px;
                 font-size: 9pt;
             }
             QPushButton:disabled {
@@ -635,7 +718,7 @@ class NNBuilderTab(QWidget):
         self.apply_best_params_btn.clicked.connect(self._apply_best_nn_parameters)
         self.apply_best_params_btn.setEnabled(False)
         self.apply_best_params_btn.setToolTip("Run Auto-Optimize first to enable this button")
-        actions_layout.addWidget(self.apply_best_params_btn, 0, 1)
+        actions_layout.addWidget(self.apply_best_params_btn, 1, 1)
         
         self.train_btn = QPushButton("Train NN")
         self.train_btn.setStyleSheet("""
@@ -643,13 +726,13 @@ class NNBuilderTab(QWidget):
                 background-color: #2E7D32;
                 color: white;
                 font-weight: bold;
-                padding: 8px;
+                padding: 6px;
                 font-size: 10pt;
             }
         """)
         self.train_btn.setToolTip("Train neural network with current configuration")
         self.train_btn.clicked.connect(self._train_network)
-        actions_layout.addWidget(self.train_btn, 0, 2)
+        actions_layout.addWidget(self.train_btn, 1, 2)
         
         left_layout.addWidget(actions_group)
         
@@ -675,8 +758,16 @@ class NNBuilderTab(QWidget):
         presets_layout.addWidget(self.large_preset_btn)
         
         left_layout.addWidget(presets_group)
-        
-        splitter.addWidget(left_widget)
+
+        # v2.0: Make the left (configuration) panel scrollable so that all
+        # controls — including the new Cross-Validation section and the action
+        # buttons — remain reachable on typical laptop and desktop screens.
+        # Nothing is ever cut off; the panel scrolls vertically when needed.
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setWidget(left_widget)
+        splitter.addWidget(left_scroll)
         
         # v1.4.0: Right panel — compact 4-panel layout with limited heights
         right_widget = QWidget()
@@ -701,24 +792,60 @@ class NNBuilderTab(QWidget):
             self.model_info_text = QTextEdit()
             self.model_info_text.setReadOnly(True)
         
-        for grp_name, widget_name, max_h in [
-            ("Training Progress", "progress_text", 80),
-            ("Architecture Preview", "architecture_text", 80),
-            ("Training Results", "results_table", 140),
-            ("Model Information", "model_info_text", 80),
-        ]:
+        # v2.0: Compact right panel — reduced to ~25% of screen
+        # with smaller minimum heights for better left-panel visibility.
+        panel_configs = [
+            ("Training Progress", "progress_text", 60, 2),    # min_h, stretch
+            ("Architecture Preview", "architecture_text", 40, 1),
+            ("Training Results", "results_table", 60, 2),
+            ("Model Information", "model_info_text", 40, 1),
+        ]
+        for grp_name, widget_name, min_h, stretch in panel_configs:
             grp = QGroupBox(grp_name)
             vl = QVBoxLayout(grp)
-            vl.setContentsMargins(3, 3, 3, 3)
+            vl.setContentsMargins(2, 2, 2, 2)
+            vl.setSpacing(2)
             w = getattr(self, widget_name)
-            w.setMaximumHeight(max_h)
-            vl.addWidget(w)
-            right_layout.addWidget(grp)
+            w.setMinimumHeight(min_h)
+            # Allow text widgets to expand but prefer compact sizing
+            if isinstance(w, QTextEdit):
+                w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            vl.addWidget(w, stretch=1)
+            right_layout.addWidget(grp, stretch=stretch)
         
         splitter.addWidget(right_widget)
-        splitter.setSizes([520, 480])  # More space for left panel
+        splitter.setSizes([750, 250])  # v2.0: Right panel ~25% of screen
         layout.addWidget(splitter)
-    
+
+    def _get_problem_type(self) -> str:
+        """Return 'classification' or 'regression' based on the loaded dataset.
+
+        Defaults to 'regression' when no data is loaded yet."""
+        data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
+        if data_manager is None or getattr(data_manager, 'data', None) is None:
+            return 'regression'
+        return 'classification' if getattr(data_manager, '_is_classification', False) else 'regression'
+
+    def _get_cv_config(self) -> CVConfig:
+        """Return the full CVConfig from the shared CV widget."""
+        return self.cv_widget.get_config()
+
+    def _resolve_cv_groups(self, cv_config: CVConfig, data_manager,
+                           test_size: float, random_state: int) -> tuple:
+        """Resolve group labels for grouped CV, aligned to the training rows.
+
+        Returns (groups_train, group_info); both None for non-grouped strategies.
+        Raises GroupingError with a user-facing message on failure.
+        """
+        if cv_config.strategy not in ('group', 'logo'):
+            return None, None
+        groups_full, group_info = self.cv_widget.resolve_groups()
+        groups_train = data_manager.get_train_group_labels(
+            groups_full, test_size=test_size, random_state=random_state,
+        )
+        cv_config.groups = np.asarray(groups_train)
+        return groups_train, group_info
+
     def _load_preset(self, preset):
         """Load a quick architecture preset."""
         self.layer_list.clear()
@@ -898,8 +1025,8 @@ class NNBuilderTab(QWidget):
             QMessageBox.warning(self, "Warning", "Please add at least one layer!")
             return
         
-        use_val = data_manager.validation_data is not None
-        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+        # v1.5.0: Always use internal test split; external validation is separate
+        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
         
         input_dim = X_train.shape[1]
         output_dim = 1 if len(y_train.shape) == 1 else y_train.shape[1]
@@ -944,13 +1071,23 @@ class NNBuilderTab(QWidget):
             hidden_layers_config=self.layer_configs,
             problem_type='classification' if data_manager._is_classification else 'regression'
         )
-        self.nn_builder.build_model()
-        
+        # v2.0: Pass the user's random_seed to build_model() so torch.manual_seed()
+        # uses the correct seed for weight initialization. The TrainingConfig will
+        # be created inside the optimization thread; we pass the seed directly.
+        random_state = self.opt_random_seed_spin.value()
+        self.nn_builder.build_model(random_seed=random_state)
+
         # Start optimization
         self.optimize_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_text.clear()
+        self.progress_text.append(
+            f"Starting NN architecture optimization ({n_trials} trials)...\n"
+            f"CV: {cv_folds}-fold | Epochs: {opt_epochs} (opt) / {cv_epochs} (CV) | "
+            f"Patience: {opt_patience} (opt) / {cv_patience} (CV)"
+        )
         
         # Read advanced optimization settings from UI (v1.2.1)
         opt_epochs = self.opt_epochs_spin.value()
@@ -976,21 +1113,29 @@ class NNBuilderTab(QWidget):
         self.optimization_thread.start()
     
     def _on_optimization_progress(self, trial_num, score, params):
-        """Handle optimization progress."""
+        """Handle optimization progress.
+
+        v2.0 FIX: Force immediate UI repaint with processEvents() so the
+        Training Progress console updates live during long optimizations.
+        """
+        from PyQt6.QtWidgets import QApplication
         self.progress_bar.setValue(int(100 * trial_num / self.opt_trials_spin.value()))
         self.progress_text.append(f"Trial {trial_num}: Score={score:.4f}")
+        QApplication.processEvents()
     
     def _on_optimization_status(self, msg: str):
         """v1.3.0: Handle status messages from optimization thread.
-        
+
         Provides visual feedback during long operations (e.g., CV fold training)
         so the user doesn't think the application has frozen.
         """
+        from PyQt6.QtWidgets import QApplication
         self.progress_text.append(msg)
         # Keep progress bar visible and in indeterminate mode during status updates
         if "Compiling" in msg or "Starting" in msg:
             self.progress_bar.setRange(0, 0)  # Indeterminate (animated)
-    
+        QApplication.processEvents()
+
     def _on_optimization_finished(self, result):
         """Handle optimization completion."""
         self.optimize_btn.setEnabled(True)
@@ -1011,12 +1156,9 @@ class NNBuilderTab(QWidget):
         from datetime import datetime
         timestamp = datetime.now().strftime("%H%M%S")
         opt_name = f"NN_Optimized_{timestamp}"
-        # v1.2.1 FIX: Replace any previous optimization result instead of
-        # appending, to prevent accumulation of stale optimization entries.
-        self.nn_optimizer_results = [
-            (n, r) for n, r in self.nn_optimizer_results 
-            if not n.startswith("NN_Optimized_")
-        ]
+        # v2.0 FIX: Keep ALL NN optimizations. The previous code deleted
+        # earlier optimizations, causing the export to miss optimization
+        # details for earlier optimized+retrained NNs.
         self.nn_optimizer_results.append((opt_name, result))
 
         details = f"Optimization Complete!\n"
@@ -1126,12 +1268,55 @@ class NNBuilderTab(QWidget):
             QMessageBox.warning(self, "Warning", "Please add at least one layer!")
             return
         
-        use_val = data_manager.validation_data is not None
-        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
-        
+        # v2.0: Configure the shared CV widget (dataset + problem type + target
+        # for point-mass detection), then validate the chosen CV strategy.
+        problem_type = 'classification' if data_manager._is_classification else 'regression'
+        self.cv_widget.set_dataframe(data_manager.data)
+        self.cv_widget.set_problem_type(problem_type)
+        try:
+            self.cv_widget.set_target_values(data_manager.data[data_manager.target_column].values)
+        except Exception:
+            self.cv_widget.set_target_values(None)
+
+        # v1.5.0: Always use internal test split; external validation is separate
+        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
+
+        # v2.0: build + validate the CV config and resolve group labels.
+        # prepare_data(use_validation=False) uses default test_size=0.2, seed=42.
+        cv_config = self._get_cv_config()
+        # v2.0: sync the CV fold shuffling with the NN Random Seed so the seed
+        # controls weight init, data shuffling, AND the CV folds.
+        cv_config.random_state = self.random_seed_spin.value()
+        try:
+            cv_groups, group_info = self._resolve_cv_groups(
+                cv_config, data_manager, test_size=0.2, random_state=42)
+        except GroupingError as e:
+            QMessageBox.warning(self, "Grouping Error", str(e))
+            return
+        _gi = group_info if cv_config.strategy in ('group', 'logo') else None
+        _issues = validate_cv_config(cv_config, len(X_train),
+                                     problem_type=problem_type, group_info=_gi,
+                                     y=y_train)
+        if has_blocking_issue(_issues):
+            QMessageBox.warning(self, "Cross-Validation Not Available",
+                                "\n\n".join(i['message'] for i in _issues if i['severity'] == 'block'))
+            return
+        _warns = [i['message'] for i in _issues if i['severity'] == 'warn']
+        if _warns:
+            reply = QMessageBox.question(
+                self, "Cross-Validation Warning",
+                "\n\n".join(_warns) + "\n\nDo you want to proceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        # Stash for _on_training_finished (which runs the trainer with CV).
+        self._pending_cv_config = cv_config
+        self._pending_cv_groups = cv_groups
+
         input_dim = X_train.shape[1]
         output_dim = 1 if len(y_train.shape) == 1 else y_train.shape[1]
-        
+
         # Create architecture
         self.nn_builder.create_architecture(
             input_dim=input_dim,
@@ -1139,9 +1324,8 @@ class NNBuilderTab(QWidget):
             hidden_layers_config=self.layer_configs,
             problem_type='classification' if data_manager._is_classification else 'regression'
         )
-        self.nn_builder.build_model()
-        
-        # Create training config
+        # v2.0: create_training_config BEFORE build_model so torch.manual_seed()
+        # has access to the user's random_seed during weight initialization.
         batch_size = int(self.batch_size_combo.currentText())
         self.nn_builder.create_training_config(
             epochs=self.epochs_spin.value(),
@@ -1155,6 +1339,7 @@ class NNBuilderTab(QWidget):
             gradient_clip_val=self.grad_clip_spin.value() if self.grad_clip_spin.value() > 0 else 0.0,
             random_seed=self.random_seed_spin.value()
         )
+        self.nn_builder.build_model()
         
         # Store CV folds for use in trainer
         self.nn_cv_folds = self.cv_folds_spin.value()
@@ -1198,9 +1383,11 @@ class NNBuilderTab(QWidget):
         data_manager = _safe_get_parent_attr(self, 'data_tab.get_data_manager()')
         trainer = _safe_get_parent_attr(self, 'training_tab.get_trainer()')
         
-        # Get data (use external validation set if loaded)
-        use_val = data_manager.validation_data is not None
-        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=use_val)
+        # v1.5.0: Always use internal test split; external validation is separate
+        X_train, X_test, y_train, y_test = data_manager.prepare_data(use_validation=False)
+        # Get external validation set if loaded
+        val_arrays = data_manager.get_validation_arrays()
+        X_ext_val, y_ext_val = (val_arrays[0], val_arrays[1]) if val_arrays else (None, None)
         
         # Determine base name: normal or optimized
         if self._best_params_applied:
@@ -1211,6 +1398,13 @@ class NNBuilderTab(QWidget):
         
         # Train through ModelTrainer to get proper CV and results.
         # The trainer automatically makes the name unique (_1, _2, etc.).
+        # v2.0: pass the validated CV config + resolved group labels so the NN
+        # uses the same strategy as sklearn models.
+        _cv_config = getattr(self, '_pending_cv_config', None)
+        _cv_groups = getattr(self, '_pending_cv_groups', None)
+        # v2.0: Pass the unfitted preprocessor so the NN CV loop can clone and
+        # refit it inside each fold (zero data leakage).
+        preprocessor = data_manager.get_preprocessor()
         try:
             result = trainer.train_neural_network(
                 self.nn_builder,
@@ -1218,7 +1412,12 @@ class NNBuilderTab(QWidget):
                 X_train, y_train,
                 X_test, y_test,
                 'classification' if data_manager._is_classification else 'regression',
-                cv_folds=cv_folds
+                cv_folds=cv_folds,
+                X_external_val=X_ext_val,
+                y_external_val=y_ext_val,
+                cv_config=_cv_config,
+                cv_groups=_cv_groups,
+                preprocessor=preprocessor,
             )
             
             # Display results

@@ -476,7 +476,7 @@ class CompositionFeatures(BaseEstimator, TransformerMixin, LoggerMixin):
         if self.use_magpie:
             self._magpie = MagpieFeatures(self.composition_column)
             self._magpie.fit(X, y)
-            self.logger.info("Usando implementacion propia de Magpie (106 descriptores)")
+            self.logger.info("Using built-in Magpie implementation (106 descriptors)")
         
         return self
     

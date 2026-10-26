@@ -10,8 +10,10 @@ import numpy as np
 from sklearn.base import BaseEstimator
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier
 from sklearn.svm import SVR, SVC
-from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.linear_model import Ridge, RidgeClassifier
+from sklearn.gaussian_process import GaussianProcessRegressor, GaussianProcessClassifier
 from sklearn.model_selection import cross_val_score
 
 from ..utils.logger import LoggerMixin
@@ -30,6 +32,60 @@ class ModelInfo:
     default_params: Dict[str, Any]
     param_ranges: Dict[str, tuple]  # (min, max, type)
     estimator_class: Type
+
+
+def _build_gp_kernel(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a sklearn GP kernel object from string parameters.
+
+    v2.1: Gaussian Process kernel construction helper. Converts the
+    user-friendly string params (kernel_type, kernel_length_scale, etc.)
+    into actual sklearn kernel objects that GaussianProcessRegressor /
+    GaussianProcessClassifier accept.
+
+    Supported kernel_type values:
+      - 'RBF': Radial Basis Function (infinitely differentiable)
+      - 'Matern': Matern kernel (controlled smoothness via nu)
+      - 'RationalQuadratic': Rational Quadratic (mixture of RBFs)
+      - 'WhiteKernel': Independent noise kernel
+      - 'RBF+WhiteKernel': RBF plus explicit noise term
+
+    Returns:
+        Modified params dict with 'kernel' key containing the kernel
+        object, and all kernel_* keys removed.
+    """
+    from sklearn.gaussian_process.kernels import (
+        RBF, Matern, RationalQuadratic, WhiteKernel
+    )
+
+    params = dict(params)  # copy to avoid mutating original
+
+    kt = params.pop('kernel_type', 'RBF')
+    ls = float(params.pop('kernel_length_scale', 1.0))
+
+    if kt == 'RBF':
+        params['kernel'] = RBF(length_scale=ls)
+    elif kt == 'Matern':
+        nu = float(params.pop('kernel_nu', 2.5))
+        params['kernel'] = Matern(length_scale=ls, nu=nu)
+    elif kt == 'RationalQuadratic':
+        alpha = float(params.pop('kernel_alpha_rq', 1.0))
+        params['kernel'] = RationalQuadratic(length_scale=ls, alpha=alpha)
+    elif kt == 'WhiteKernel':
+        noise = float(params.pop('kernel_noise_level', 1.0))
+        params['kernel'] = WhiteKernel(noise_level=noise)
+    elif kt == 'RBF+WhiteKernel':
+        noise = float(params.pop('kernel_noise_level', 1.0))
+        params['kernel'] = RBF(length_scale=ls) + WhiteKernel(noise_level=noise)
+    else:
+        # Fallback to RBF
+        params['kernel'] = RBF(length_scale=ls)
+
+    # Clean up any remaining kernel_* params
+    for k in list(params.keys()):
+        if k.startswith('kernel_'):
+            params.pop(k)
+
+    return params
 
 
 class ModelRegistry(LoggerMixin):
@@ -102,6 +158,40 @@ class ModelRegistry(LoggerMixin):
             )
         )
         
+        # Histogram Gradient Boosting (v2.0: parallelized version of GB)
+        self.register(
+            ModelInfo(
+                name='hist_gradient_boosting',
+                display_name='Histogram Gradient Boosting',
+                description='Histogram-based gradient boosting with parallel tree building (sklearn)',
+                supports_classification=True,
+                supports_regression=True,
+                supports_gpu=False,
+                default_params={
+                    'max_iter': 100,
+                    'max_depth': 3,
+                    'learning_rate': 0.1,
+                    'min_samples_leaf': 20,
+                    'max_bins': 255,
+                    'l2_regularization': 0.0,
+                    'random_state': 42,
+                    'early_stopping': False,
+                    # Note: HistGradientBoosting uses OpenMP internally for
+                    # parallelism (not n_jobs). Thread count is controlled via
+                    # environment variables or threadpoolctl if needed.
+                },
+                param_ranges={
+                    'max_iter': (10, 1000, 'int'),
+                    'max_depth': (2, 20, 'int'),
+                    'learning_rate': (0.001, 1.0, 'float'),
+                    'min_samples_leaf': (1, 100, 'int'),
+                    'max_bins': (50, 255, 'int'),
+                    'l2_regularization': (0.0, 10.0, 'float'),
+                },
+                estimator_class=HistGradientBoostingRegressor
+            )
+        )
+
         # XGBoost
         self._register_xgboost()
         
@@ -153,6 +243,40 @@ class ModelRegistry(LoggerMixin):
                     'alpha': (0.001, 100.0, 'float'),
                 },
                 estimator_class=Ridge
+            )
+        )
+
+        # Gaussian Process (v2.1: full kernel family + hyperparameter support)
+        self.register(
+            ModelInfo(
+                name='gaussian_process',
+                display_name='Gaussian Process',
+                description='Gaussian Process Regressor/Classifier with kernel tuning and native uncertainty quantification',
+                supports_classification=True,
+                supports_regression=True,
+                supports_gpu=False,
+                default_params={
+                    'alpha': 1e-10,
+                    'n_restarts_optimizer': 10,
+                    'normalize_y': True,
+                    'random_state': 42,
+                    'kernel_type': 'RBF',
+                    'kernel_length_scale': 1.0,
+                    'kernel_nu': 2.5,
+                    'kernel_alpha_rq': 1.0,
+                    'kernel_noise_level': 1e-5,
+                },
+                param_ranges={
+                    'alpha': (1e-10, 1.0, 'float_log'),
+                    'n_restarts_optimizer': (1, 20, 'int'),
+                    'normalize_y': ([True, False], None, 'categorical'),
+                    'kernel_type': (['RBF', 'Matern', 'RationalQuadratic', 'WhiteKernel', 'RBF+WhiteKernel'], None, 'categorical'),
+                    'kernel_length_scale': (1e-3, 100.0, 'float_log'),
+                    'kernel_nu': ([0.5, 1.5, 2.5], None, 'categorical'),
+                    'kernel_alpha_rq': (1e-3, 100.0, 'float_log'),
+                    'kernel_noise_level': (1e-5, 1.0, 'float_log'),
+                },
+                estimator_class=GaussianProcessRegressor
             )
         )
     
@@ -283,7 +407,9 @@ class ModelRegistry(LoggerMixin):
                         'l2_leaf_reg': 3.0,
                         'random_seed': 42,
                         'verbose': False,
-                        'task_type': 'GPU' if gpu_available else 'CPU'
+                        'task_type': 'GPU' if gpu_available else 'CPU',
+                        # v2.0: Explicit thread control to prevent oversubscription
+                        'thread_count': self._hardware.info.recommended_n_jobs if not gpu_available else -1,
                     },
                     param_ranges={
                         'iterations': (10, 2000, 'int'),
@@ -324,7 +450,8 @@ class ModelRegistry(LoggerMixin):
         self,
         name: str,
         problem_type: str = 'regression',
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        random_state: Optional[int] = None
     ) -> BaseEstimator:
         """Create model estimator.
         
@@ -332,6 +459,7 @@ class ModelRegistry(LoggerMixin):
             name: Model name
             problem_type: 'regression' or 'classification'
             params: Override default parameters
+            random_state: Override the default random_state (v1.5.0)
             
         Returns:
             Configured estimator
@@ -352,8 +480,24 @@ class ModelRegistry(LoggerMixin):
         
         # Merge parameters
         final_params = model_info.default_params.copy()
+        
+        # v1.5.0: Apply user's random_state before custom params
+        if random_state is not None:
+            # CatBoost uses 'random_seed' instead of 'random_state'
+            estimator_name = estimator_class.__name__.lower()
+            if 'catboost' in estimator_name:
+                final_params['random_seed'] = random_state
+            else:
+                final_params['random_state'] = random_state
+        
         if params:
             final_params.update(params)
+        
+        # v2.1: For Gaussian Process, build the kernel object from string
+        # parameters BEFORE filtering. This converts kernel_type, kernel_length_scale,
+        # etc. into an actual sklearn Kernel object that GPR/GPC accept.
+        if 'gaussianprocess' in estimator_class.__name__.lower():
+            final_params = _build_gp_kernel(final_params)
         
         # v1.3.0 FIX: Filter out parameters the estimator does not accept.
         # This prevents TypeError when e.g., random_state is passed to SVR
@@ -396,8 +540,10 @@ class ModelRegistry(LoggerMixin):
         class_mapping = {
             'RandomForestRegressor': RandomForestClassifier,
             'GradientBoostingRegressor': GradientBoostingClassifier,
+            'HistGradientBoostingRegressor': HistGradientBoostingClassifier,
             'SVR': SVC,
-            'Ridge': LogisticRegression,
+            'Ridge': RidgeClassifier,
+            'GaussianProcessRegressor': GaussianProcessClassifier,
         }
         
         class_name = regressor_class.__name__

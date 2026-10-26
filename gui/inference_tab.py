@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QProgressBar,
     QMessageBox, QScrollArea, QFrame, QTextEdit,
     QCheckBox, QSpinBox, QSplitter, QHeaderView,
-    QDialog, QDialogButtonBox
+    QDialog, QDialogButtonBox, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -20,6 +20,7 @@ from PyQt6.QtGui import QColor
 
 
 from ..core.inference_engine import InferenceEngine, LegacyInferenceEngine
+from ..core.dataset_exporter import DatasetExporter
 from ..core.crystal_structure import (
     CrystalStructureLoader, CrystalStructureFeaturizer,
     CrystalStructureDatasetBuilder
@@ -28,24 +29,116 @@ from ..utils.logger import LoggerMixin
 
 
 class PredictionThread(QThread):
-    """Thread for running predictions."""
+    """Thread for running predictions with optional confidence intervals."""
     progress = pyqtSignal(int)
     finished = pyqtSignal(pd.DataFrame)
     error = pyqtSignal(str)
     
-    def __init__(self, engine: InferenceEngine, df: pd.DataFrame):
+    def __init__(self, engine: InferenceEngine, df: pd.DataFrame, include_intervals: bool = False):
         super().__init__()
         self.engine = engine
         self.df = df
+        self.include_intervals = include_intervals
     
     def run(self):
         try:
             self.progress.emit(10)
-            
-            # Run prediction
-            result = self.engine.predict(self.df)
-            
+
+            # v2.0: Always use predict_with_ood() so the GUI receives the OOD
+            # columns (ood_distance, ood_flag, ood_warning) alongside predictions.
+            # If the bundle is legacy and has no OOD detector, the columns are
+            # filled with neutral values (NaN, False, "") — no branching needed.
+            if self.include_intervals:
+                # TODO: predict_with_intervals could also return OOD columns;
+                # for now we keep intervals and OOD as separate calls.
+                result = self.engine.predict_with_intervals(self.df)
+            else:
+                result = self.engine.predict_with_ood(self.df)
+
             self.progress.emit(100)
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class LinkedPredictionThread(QThread):
+    """Thread for running predictions with linked structures.
+    
+    Handles all 4 cases:
+    1. Crystal structures only (.cif linking)
+    2. Molecule structures only (.xyz linking)
+    3. Crystal + composition featurization
+    4. Molecule + composition featurization
+    """
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(pd.DataFrame)
+    error = pyqtSignal(str)
+    
+    def __init__(
+        self,
+        engine: InferenceEngine,
+        df: pd.DataFrame,
+        id_column: str,
+        structure_folder: str,
+        structure_type: str,
+        include_intervals: bool = False,
+    ):
+        super().__init__()
+        self.engine = engine
+        self.df = df
+        self.id_column = id_column
+        self.structure_folder = structure_folder
+        self.structure_type = structure_type
+        self.include_intervals = include_intervals
+    
+    def run(self):
+        try:
+            self.progress.emit("Step 1/3: Linking structures...")
+            
+            # Step 1: Link structures
+            if self.structure_type == "crystal":
+                try:
+                    from ..core.crystal_feature_extractor import CrystalFeatureExtractor
+                except ImportError as e:
+                    raise RuntimeError(
+                        "Crystal structure support not available. "
+                        "Install pymatgen: pip install pymatgen-core"
+                    ) from e
+                linker = CrystalFeatureExtractor()
+                linked_df, report = linker.link_structures(
+                    self.df, self.id_column, self.structure_folder
+                )
+                
+                self.progress.emit(
+                    f"Step 1/3: Linked {report.n_matched}/{report.n_rows_total} "
+                    f"crystal structures ({report.match_rate*100:.0f}%)"
+                )
+                
+            elif self.structure_type == "molecule":
+                from ..core.molecule_feature_linker import MoleculeFeatureLinker
+                linker = MoleculeFeatureLinker()
+                linked_df, report = linker.link_structures(
+                    self.df, self.id_column, self.structure_folder
+                )
+                
+                self.progress.emit(
+                    f"Step 1/3: Linked {report.n_matched}/{report.n_rows_total} "
+                    f"molecular structures ({report.match_rate*100:.0f}%)"
+                )
+            else:
+                raise ValueError(f"Unknown structure type: {self.structure_type}")
+            
+            # Step 2: Predict
+            # v2.0: Composition is auto-derived from structure files during linking.
+            # No separate Magpie step — both linkers include periodic properties.
+            self.progress.emit("Step 2/2: Running prediction...")
+            if self.include_intervals:
+                result = self.engine.predict_with_intervals(linked_df)
+            else:
+                result = self.engine.predict(linked_df)
+            
+            self.progress.emit("Complete!")
             self.finished.emit(result)
             
         except Exception as e:
@@ -59,7 +152,9 @@ class InferenceTab(QWidget, LoggerMixin):
         """Initialize inference tab."""
         super().__init__(parent)
         
-        self.parent = parent
+        # CRITICAL: Do NOT use 'self.parent = parent' — it overwrites
+        # the PyQt parent() method and breaks the widget hierarchy.
+        self._main_window = parent
         self.inference_engine: Optional[InferenceEngine] = None
         self.input_data: Optional[pd.DataFrame] = None
         self.prediction_result: Optional[pd.DataFrame] = None
@@ -90,6 +185,7 @@ class InferenceTab(QWidget, LoggerMixin):
         path_layout.addWidget(self.model_path_edit)
         
         self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.setToolTip("Select a model bundle (.joblib or folder) exported from the Results tab")
         self.browse_btn.clicked.connect(self._browse_model)
         path_layout.addWidget(self.browse_btn)
         
@@ -177,6 +273,68 @@ class InferenceTab(QWidget, LoggerMixin):
         
         splitter.addWidget(xtal_group)
         
+        # === v2.0: LINKED STRUCTURE SECTION (crystal/molecule from tabular data) ===
+        self.link_group = QGroupBox("Link Structures for Prediction (v2.0)")
+        self.link_group.setVisible(False)  # Shown only when linked model is loaded
+        link_layout = QVBoxLayout(self.link_group)
+        link_layout.setSpacing(6)
+        link_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Row 1: Structure folder + ID column + Type
+        row1 = QHBoxLayout()
+        
+        row1.addWidget(QLabel("Folder:"))
+        self.link_folder_edit = QLineEdit()
+        self.link_folder_edit.setPlaceholderText("Select folder with .cif or .xyz files...")
+        self.link_folder_edit.setReadOnly(True)
+        row1.addWidget(self.link_folder_edit, stretch=2)
+        
+        self.link_browse_btn = QPushButton("Browse...")
+        self.link_browse_btn.clicked.connect(self._browse_link_folder)
+        row1.addWidget(self.link_browse_btn)
+        
+        row1.addSpacing(15)
+        row1.addWidget(QLabel("ID Column:"))
+        self.link_id_combo = QComboBox()
+        self.link_id_combo.setMinimumWidth(120)
+        self.link_id_combo.setToolTip("Column in CSV that matches structure filenames")
+        row1.addWidget(self.link_id_combo, stretch=1)
+        
+        row1.addSpacing(15)
+        row1.addWidget(QLabel("Type:"))
+        self.link_type_label = QLabel("Auto-detect")
+        self.link_type_label.setStyleSheet("font-weight: bold; color: #4fc3f7;")
+        row1.addWidget(self.link_type_label)
+        
+        link_layout.addLayout(row1)
+        
+        # Row 2: Status + Predict with Linked Structures button
+        row2 = QHBoxLayout()
+        
+        self.link_status_label = QLabel("Load a linked model to enable")
+        self.link_status_label.setStyleSheet("padding: 5px; border-radius: 3px; font-size: 9pt;")
+        row2.addWidget(self.link_status_label, stretch=1)
+        
+        self.link_predict_btn = QPushButton("Predict with Linked Structures")
+        self.link_predict_btn.setToolTip(
+            "Automatically link structure files to the CSV data, then run prediction"
+        )
+        self.link_predict_btn.setEnabled(False)
+        self.link_predict_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1565C0; color: white; font-weight: bold;
+                padding: 8px 16px;
+            }
+            QPushButton:disabled { background-color: #555555; }
+            QPushButton:hover:enabled { background-color: #1976D2; }
+        """)
+        self.link_predict_btn.clicked.connect(self._run_linked_prediction)
+        row2.addWidget(self.link_predict_btn)
+        
+        link_layout.addLayout(row2)
+        
+        splitter.addWidget(self.link_group)
+        
         # === BOTTOM SECTION: Prediction & Results ===
         # This section is OUTSIDE the splitter to always remain visible
         bottom_widget = QWidget()
@@ -185,8 +343,11 @@ class InferenceTab(QWidget, LoggerMixin):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(6)
         
-        # Prediction button
+        # Prediction button + confidence interval checkbox
+        predict_row = QHBoxLayout()
+        
         self.predict_btn = QPushButton("Run Prediction")
+        self.predict_btn.setToolTip("Generate predictions using the loaded model and data")
         self.predict_btn.setEnabled(False)
         self.predict_btn.setStyleSheet("""
             QPushButton {
@@ -204,13 +365,46 @@ class InferenceTab(QWidget, LoggerMixin):
             }
         """)
         self.predict_btn.clicked.connect(self._run_prediction)
-        bottom_layout.addWidget(self.predict_btn)
+        predict_row.addWidget(self.predict_btn, stretch=1)
+        
+        # v1.5.0: Confidence interval checkbox
+        self.ci_check = QCheckBox("Include Confidence Intervals")
+        self.ci_check.setToolTip(
+            "When checked, predictions include confidence intervals based on "
+            "CV residual analysis (regression) or class probabilities (classification). "
+            "Intervals are saved as additional columns in the CSV export."
+        )
+        self.ci_check.setChecked(True)
+        predict_row.addWidget(self.ci_check)
+        
+        bottom_layout.addLayout(predict_row)
         
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         bottom_layout.addWidget(self.progress_bar)
         
+        # v2.0: Peer-review compliant disclaimer banner — visible BEFORE results
+        self.disclaimer_banner = QLabel(
+            "<b>These predictions are model estimates for screening and prioritisation, "
+            "NOT experimentally validated properties.</b><br>"
+            "Use them to rank and filter candidate materials, then verify independently "
+            "before making design decisions."
+        )
+        self.disclaimer_banner.setWordWrap(True)
+        self.disclaimer_banner.setStyleSheet(
+            "QLabel {"
+            "  background-color: #FFF3CD;"
+            "  color: #856404;"
+            "  border: 1px solid #F0AD4E;"
+            "  border-radius: 4px;"
+            "  padding: 8px;"
+            "  font-size: 12px;"
+            "}"
+        )
+        self.disclaimer_banner.setVisible(False)  # shown after model is loaded
+        bottom_layout.addWidget(self.disclaimer_banner)
+
         # Results section
         results_group = QGroupBox("Prediction Results")
         results_layout = QVBoxLayout(results_group)
@@ -221,7 +415,26 @@ class InferenceTab(QWidget, LoggerMixin):
         stats_layout.addWidget(self.stats_label)
         stats_layout.addStretch()
         
-        self.export_btn = QPushButton("Export to CSV...")
+        self.export_featurized_btn = QPushButton("Export Featurized Dataset")
+        self.export_featurized_btn.setToolTip(
+            "Export the input dataset with all generated features to CSV. "
+            "This is the featurized data used for prediction, before predictions are added."
+        )
+        self.export_featurized_btn.setEnabled(False)
+        self.export_featurized_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2E7D32;
+                color: white;
+                font-weight: bold;
+                padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #388E3C; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        self.export_featurized_btn.clicked.connect(self._export_featurized_dataset)
+        stats_layout.addWidget(self.export_featurized_btn)
+
+        self.export_btn = QPushButton("Export Predictions")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_results)
         stats_layout.addWidget(self.export_btn)
@@ -354,6 +567,20 @@ class InferenceTab(QWidget, LoggerMixin):
 <b>Target Column:</b> {info.get('target_column', 'Unknown')}<br>
 <b>Metrics:</b> {json.dumps(info.get('metrics', {}), indent=2)}
             """
+            # v2.0: CV provenance — show how the model was validated during
+            # training (e.g. "Group K-Fold (by chemical system)"). This is a
+            # read-only traceability line; prediction itself never runs CV.
+            cv_val = info.get('cv_validation')
+            if cv_val:
+                info_text += f"<br><b>Validated with:</b> {cv_val}"
+            # v2.0: Gaussian Process native uncertainty info
+            uncertainty = info.get('uncertainty')
+            if uncertainty:
+                info_text += f"""
+<br><br><span style='color: #FFB74D;'><b>🔮 Native Uncertainty Quantification</b></span><br>
+Kernel: {uncertainty.get('kernel', 'N/A')} | Alpha: {uncertainty.get('alpha', 'N/A')}<br>
+{uncertainty.get('note', '')}
+                """
             if has_id_bug:
                 info_text += f"""
 <br><br><span style='color: #ff6b6b;'><b>⚠️ This model appears to have been trained with a bug</b></span><br>
@@ -387,6 +614,12 @@ with AutoAIM Studio v1.3.0 or later.
                 else:
                     self.version_warning_label.setText("")
             
+            # v2.0: Check if model requires linked structures
+            self._check_linked_model()
+
+            # v2.0: Show disclaimer banner once a model is loaded
+            self.disclaimer_banner.setVisible(True)
+
             self.logger.info(f"Model loaded: {info.get('model_name')} ({n_features} features)")
             self._update_predict_button()
             
@@ -422,12 +655,19 @@ with AutoAIM Studio v1.3.0 or later.
                 if self.inference_engine:
                     self._validate_data()
                 
+                # v2.0: Update ID column combo if linked model is loaded
+                if self.link_group.isVisible():
+                    self._update_link_id_combo()
+                    self._update_link_predict_button()
+                
                 self.logger.info(f"Data loaded: {len(self.input_data)} rows, {len(self.input_data.columns)} columns")
+                self.export_featurized_btn.setEnabled(True)
                 self._update_predict_button()
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error Loading Data", str(e))
                 self.input_data = None
+                self.export_featurized_btn.setEnabled(False)
     
     def _update_data_preview(self):
         """Update data preview table."""
@@ -455,6 +695,21 @@ with AutoAIM Studio v1.3.0 or later.
             return
         
         validation = self.inference_engine.validate_input(self.input_data)
+        
+        # v2.0: If model requires linked structures and ONLY linked features are missing,
+        # show a special message directing the user to use linked prediction
+        if validation.get("needs_linking_action"):
+            missing_linked = validation.get("missing_linked_features", [])
+            structure_type = validation.get("requires_structure_linking")
+            self.validation_label.setText(
+                f"🔗 Linked features required: {len(missing_linked)} features missing. "
+                f"Use 'Predict with Linked Structures' section below."
+            )
+            self.validation_label.setStyleSheet(
+                "background-color: #1a3a4a; color: white; padding: 5px; border-radius: 3px;"
+            )
+            self._update_predict_button()
+            return
         
         if validation["valid"]:
             self.validation_label.setText(f"✅ {validation['message']}")
@@ -499,6 +754,25 @@ with AutoAIM Studio v1.3.0 or later.
         
         # Check if we need to generate features
         validation = self.inference_engine.validate_input(self.input_data)
+        
+        # v2.0: If linked model and only linked features are missing, redirect user
+        if validation.get("needs_linking_action"):
+            missing_linked = validation.get("missing_linked_features", [])
+            reqs = self.inference_engine.get_linked_structure_requirements()
+            structure_type = reqs.get("structure_type", "structure")
+            
+            QMessageBox.information(
+                self,
+                "Linked Features Required",
+                f"This model was trained with linked {structure_type} features that are "
+                f"missing from the input data.\n\n"
+                f"Missing: {len(missing_linked)} features\n\n"
+                f"Please use the 'Predict with Linked Structures' section below:\n"
+                f"1. Select the folder containing your {structure_type} files\n"
+                f"2. Select the ID column that matches filenames\n"
+                f"3. Click 'Predict with Linked Structures'"
+            )
+            return
         
         if not validation["valid"] and validation.get("missing_columns"):
             if self.auto_features_check.isChecked():
@@ -573,7 +847,11 @@ with AutoAIM Studio v1.3.0 or later.
         self.progress_bar.setValue(0)
         self.predict_btn.setEnabled(False)
         
-        self.prediction_thread = PredictionThread(self.inference_engine, self.input_data)
+        # v1.5.0: Check if confidence intervals are requested
+        include_ci = self.ci_check.isChecked()
+        self.prediction_thread = PredictionThread(
+            self.inference_engine, self.input_data, include_intervals=include_ci
+        )
         self.prediction_thread.progress.connect(self.progress_bar.setValue)
         self.prediction_thread.finished.connect(self._prediction_finished)
         self.prediction_thread.error.connect(self._prediction_error)
@@ -591,11 +869,20 @@ with AutoAIM Studio v1.3.0 or later.
         # Enable export
         self.export_btn.setEnabled(True)
         
+        # v2.0: Gaussian Process — mention native uncertainty in completion message
+        has_uncertainty = 'prediction_std' in result.columns
+        uncertainty_msg = (
+            "\n\nThe model also provides a 'prediction_std' column with the "
+            "native posterior standard deviation (±1σ). Lower values = higher confidence."
+            if has_uncertainty else ""
+        )
+        
         QMessageBox.information(
             self,
             "Prediction Complete",
             f"Successfully predicted {len(result)} rows.\n"
             f"Predictions saved in 'prediction' column."
+            f"{uncertainty_msg}"
         )
     
     def _prediction_error(self, error_msg: str):
@@ -606,45 +893,82 @@ with AutoAIM Studio v1.3.0 or later.
         QMessageBox.critical(self, "Prediction Error", error_msg)
     
     def _update_results_display(self):
-        """Update results display."""
+        """Update results display.
+
+        v2.0: Adds OOD highlighting — rows where ood_flag is True are tinted
+        red, and a count of extrapolated samples is shown in the statistics.
+        """
         if self.prediction_result is None:
             return
-        
+
         predictions = self.prediction_result['prediction']
-        
+
+        # v2.0: Count OOD samples if present
+        ood_flags = self.prediction_result.get('ood_flag')
+        n_ood = int(ood_flags.sum()) if ood_flags is not None else 0
+
         # Update statistics
         stats_text = f"""
 <b>Prediction Statistics:</b><br>
-Count: {len(predictions)} | 
-Min: {predictions.min():.4f} | 
-Max: {predictions.max():.4f} | 
-Mean: {predictions.mean():.4f} | 
+Count: {len(predictions)} |
+Min: {predictions.min():.4f} |
+Max: {predictions.max():.4f} |
+Mean: {predictions.mean():.4f} |
 Std: {predictions.std():.4f}
         """
+        if n_ood > 0:
+            stats_text += (
+                f"<br><span style='color: #C62828;'>"
+                f"⚠️ {n_ood} sample(s) flagged as out-of-distribution (extrapolation)."
+                f"</span>"
+            )
         self.stats_label.setText(stats_text)
-        
+
         # Update results table (show first 10 rows with prediction)
         display_df = self.prediction_result.head(10)
-        
+
         self.results_table.setColumnCount(len(display_df.columns))
         self.results_table.setRowCount(len(display_df))
-        
+
         self.results_table.setHorizontalHeaderLabels(display_df.columns)
-        
+
         for i, (idx, row) in enumerate(display_df.iterrows()):
+            # v2.0: Determine if this row is OOD
+            is_ood = bool(row.get('ood_flag', False))
             for j, col in enumerate(display_df.columns):
                 val = row[col]
                 if isinstance(val, float):
                     item = QTableWidgetItem(f"{val:.4f}")
                 else:
                     item = QTableWidgetItem(str(val))
-                
+
                 # Highlight prediction column
                 if col == 'prediction':
                     item.setBackground(QColor(13, 115, 119, 100))
-                
+                # v2.0: Highlight uncertainty column for Gaussian Process
+                if col == 'prediction_std':
+                    item.setBackground(QColor(255, 183, 77, 80))
+                    item.setToolTip(
+                        "Posterior standard deviation (±1σ) from the Gaussian Process. "
+                        "Lower values indicate higher model confidence."
+                    )
+                # v2.0: Tint entire OOD row red
+                if is_ood:
+                    item.setBackground(QColor(255, 205, 210, 180))
+                    if col == 'ood_flag':
+                        item.setToolTip(
+                            "This composition lies outside the model's applicability domain. "
+                            "The prediction is an extrapolation and should be interpreted "
+                            "with extreme caution."
+                        )
+                    if col == 'ood_distance':
+                        item.setToolTip(
+                            "Distance to the nearest training neighbour in standardised "
+                            "feature space. Higher values = further from known data."
+                        )
+
                 self.results_table.setItem(i, j, item)
-        
+
         self.results_table.resizeColumnsToContents()
     
     def _export_results(self):
@@ -685,6 +1009,277 @@ Std: {predictions.std():.4f}
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", str(e))
+
+    def _export_featurized_dataset(self):
+        """Export the featurized input dataset to CSV (before prediction).
+
+        v2.0: This exports self.input_data — the dataset with all generated
+        features (auto-generated composition features, linked structure
+        features, etc.) that was used as input for prediction.
+        Uses DatasetExporter for testable core logic.
+        """
+        if self.input_data is None:
+            QMessageBox.warning(self, "No Data", "No featurized dataset to export. Please load data first.")
+            return
+
+        df = self.input_data
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Featurized Dataset",
+            "autoaim_featurized_dataset.csv",
+            "CSV Files (*.csv);;All Files (*.*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            n_rows, n_cols = DatasetExporter.export_to_csv(df, file_path)
+            summary = DatasetExporter.get_export_summary(df, file_path)
+
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"Featurized dataset exported successfully!\n\n"
+                f"File: {summary['file']}\n"
+                f"Rows: {summary['rows']}\n"
+                f"Columns: {summary['columns']}\n\n"
+                f"Feature breakdown:\n{summary['breakdown']}\n\n"
+                f"This dataset contains all generated features used for prediction. "
+                f"Use it for external analysis or as input for other tools."
+            )
+            self.logger.info(
+                f"Featurized dataset exported: {file_path} "
+                f"({summary['rows']} rows x {summary['columns']} columns)"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export featurized dataset:\n{str(e)}")
+
+    # ------------------------------------------------------------------
+    # v2.0: Linked Structure Support (crystal/molecule from tabular data)
+    # ------------------------------------------------------------------
+    
+    def _check_linked_model(self):
+        """Check if loaded model requires linked structures and update UI."""
+        if self.inference_engine is None:
+            self.link_group.setVisible(False)
+            return
+        
+        is_linked = self.inference_engine.is_structure_linked_model()
+        self.link_group.setVisible(is_linked)
+        
+        if is_linked:
+            reqs = self.inference_engine.get_linked_structure_requirements()
+            structure_type = reqs.get("structure_type", "unknown")
+            missing_count = reqs.get("missing_feature_count", 0)
+            prefixes = reqs.get("linked_prefixes", [])
+            
+            # Update type label
+            type_display = {
+                "crystal": "Crystal (CIF)",
+                "molecule": "Molecule (.xyz)",
+            }.get(structure_type, structure_type)
+            self.link_type_label.setText(type_display)
+            
+            # Style based on type
+            if structure_type == "crystal":
+                self.link_type_label.setStyleSheet("font-weight: bold; color: #CE93D8;")
+            elif structure_type == "molecule":
+                self.link_type_label.setStyleSheet("font-weight: bold; color: #80CBC4;")
+            
+            # Update status
+            prefix_desc = ", ".join(p.rstrip("_") for p in prefixes if p not in ("composition",))
+            self.link_status_label.setText(
+                f"Model requires {missing_count} linked features ({prefix_desc}). "
+                f"Select structure folder and ID column, then click 'Predict with Linked Structures'."
+            )
+            self.link_status_label.setStyleSheet(
+                "padding: 5px; border-radius: 3px; font-size: 9pt; background-color: #1a3a4a;"
+            )
+            
+            # Update ID column combo if data is loaded
+            self._update_link_id_combo()
+            self._update_link_predict_button()
+            
+            self.logger.info(
+                f"Linked model detected: {structure_type}, "
+                f"{missing_count} linked features required"
+            )
+    
+    def _browse_link_folder(self):
+        """Browse for structure folder (CIF or .xyz)."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Structure Folder",
+            "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        if folder:
+            self.link_folder_edit.setText(folder)
+            # Count structure files
+            path = Path(folder)
+            if self.link_type_label.text().startswith("Crystal"):
+                n_files = len(list(path.glob("*.cif")))
+                ext = ".cif"
+            elif self.link_type_label.text().startswith("Molecule"):
+                n_files = len(list(path.glob("*.xyz")))
+                ext = ".xyz"
+            else:
+                n_cif = len(list(path.glob("*.cif")))
+                n_xyz = len(list(path.glob("*.xyz")))
+                if n_cif > 0 and n_xyz == 0:
+                    n_files = n_cif
+                    ext = ".cif"
+                    self.link_type_label.setText("Crystal (CIF)")
+                elif n_xyz > 0 and n_cif == 0:
+                    n_files = n_xyz
+                    ext = ".xyz"
+                    self.link_type_label.setText("Molecule (.xyz)")
+                else:
+                    n_files = n_cif + n_xyz
+                    ext = ".cif/.xyz"
+            
+            self.link_status_label.setText(
+                f"Found {n_files} {ext} files in folder. Ready to link."
+            )
+            self.link_status_label.setStyleSheet(
+                "padding: 5px; border-radius: 3px; font-size: 9pt; background-color: #1a472a;"
+            )
+            self._update_link_predict_button()
+    
+    def _update_link_id_combo(self):
+        """Update ID column dropdown with columns from loaded data."""
+        self.link_id_combo.clear()
+        if self.input_data is not None and not self.input_data.empty:
+            for col in self.input_data.columns:
+                self.link_id_combo.addItem(col)
+    
+    def _update_link_predict_button(self):
+        """Enable/disable linked prediction button."""
+        can_link = (
+            self.inference_engine is not None
+            and self.input_data is not None
+            and self.link_folder_edit.text()
+            and self.link_id_combo.currentText()
+        )
+        self.link_predict_btn.setEnabled(can_link)
+    
+    def _run_linked_prediction(self):
+        """Run prediction with linked structures.
+        
+        This is the main method that handles all 4 cases:
+        1. Crystal structures only (.cif linking)
+        2. Molecule structures only (.xyz linking)
+        3. Crystal + composition featurization
+        4. Molecule + composition featurization
+        """
+        if self.inference_engine is None or self.input_data is None:
+            return
+        
+        structure_folder = self.link_folder_edit.text()
+        id_column = self.link_id_combo.currentText()
+        
+        if not structure_folder or not id_column:
+            QMessageBox.warning(
+                self, "Missing Information",
+                "Please select a structure folder and an ID column."
+            )
+            return
+        
+        if id_column not in self.input_data.columns:
+            QMessageBox.warning(
+                self, "Invalid ID Column",
+                f"Column '{id_column}' not found in the data."
+            )
+            return
+        
+        # Determine structure type from manifest
+        reqs = self.inference_engine.get_linked_structure_requirements()
+        structure_type = reqs.get("structure_type")
+        
+        if structure_type is None:
+            # Fallback: try to detect from folder contents
+            path = Path(structure_folder)
+            n_cif = len(list(path.glob("*.cif")))
+            n_xyz = len(list(path.glob("*.xyz")))
+            if n_cif > n_xyz:
+                structure_type = "crystal"
+            elif n_xyz > n_cif:
+                structure_type = "molecule"
+            else:
+                QMessageBox.critical(
+                    self, "Cannot Detect Structure Type",
+                    "Cannot determine if structures are crystal (CIF) or molecule (.xyz). "
+                    "Please ensure the model was saved with linked features."
+                )
+                return
+        
+        # v2.0: Composition is auto-derived from structure files — no separate step.
+        # Both CrystalFeatureExtractor and MoleculeFeatureLinker include periodic
+        # properties (electronegativity, atomic mass) directly from the structure.
+        
+        # Run linking + prediction in a thread
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Indeterminate
+        self.predict_btn.setEnabled(False)
+        self.link_predict_btn.setEnabled(False)
+        
+        self.linked_pred_thread = LinkedPredictionThread(
+            engine=self.inference_engine,
+            df=self.input_data.copy(),
+            id_column=id_column,
+            structure_folder=structure_folder,
+            structure_type=structure_type,
+            include_intervals=self.ci_check.isChecked(),
+        )
+        self.linked_pred_thread.progress.connect(self._on_linked_progress)
+        self.linked_pred_thread.finished.connect(self._on_linked_finished)
+        self.linked_pred_thread.error.connect(self._on_linked_error)
+        self.linked_pred_thread.start()
+    
+    def _on_linked_progress(self, message: str):
+        """Update status during linked prediction."""
+        self.link_status_label.setText(message)
+    
+    def _on_linked_finished(self, result: pd.DataFrame):
+        """Handle linked prediction completion."""
+        self.prediction_result = result
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.predict_btn.setEnabled(True)
+        self.link_predict_btn.setEnabled(True)
+        
+        self._update_results_display()
+        self.export_btn.setEnabled(True)
+        
+        self.link_status_label.setText(
+            f"Prediction complete: {len(result)} rows. "
+            f"Predictions saved in 'prediction' column."
+        )
+        self.link_status_label.setStyleSheet(
+            "padding: 5px; border-radius: 3px; font-size: 9pt; background-color: #1a472a;"
+        )
+        
+        QMessageBox.information(
+            self, "Linked Prediction Complete",
+            f"Successfully linked structures and predicted {len(result)} rows.\n"
+            f"Predictions saved in 'prediction' column."
+        )
+    
+    def _on_linked_error(self, error_msg: str):
+        """Handle linked prediction error."""
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.predict_btn.setEnabled(True)
+        self.link_predict_btn.setEnabled(True)
+        
+        self.link_status_label.setText(f"Error: {error_msg[:100]}")
+        self.link_status_label.setStyleSheet(
+            "padding: 5px; border-radius: 3px; font-size: 9pt; background-color: #5a2d2d;"
+        )
+        
+        QMessageBox.critical(self, "Linked Prediction Error", error_msg)
     
     # ------------------------------------------------------------------
     # Crystal structure prediction (v1.2.0)

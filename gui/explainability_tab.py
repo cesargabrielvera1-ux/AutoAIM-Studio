@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QComboBox, QTableWidget, QTableWidgetItem, QGroupBox,
     QMessageBox, QSplitter, QTextEdit, QListWidget, QListWidgetItem,
-    QSpinBox, QTabWidget, QCheckBox, QProgressBar
+    QSpinBox, QTabWidget, QCheckBox, QProgressBar,
+    QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
@@ -18,7 +19,7 @@ class ExplainabilityThread(QThread):
     """Thread for running explainability analysis."""
     progress = pyqtSignal(str, int)  # message, percent
     log = pyqtSignal(str)  # log message
-    finished = pyqtSignal(dict);
+    finished = pyqtSignal(dict)
     error = pyqtSignal(str)
     
     def __init__(self, explainer, domain_analyzer, model, is_nn, X_train, X_test, y_train, y_test, 
@@ -63,6 +64,20 @@ class ExplainabilityThread(QThread):
                     available_cols = [c for c in importance_df.columns if c != 'feature']
                     self.log.emit(f"Feature importance computed. Columns: {available_cols}")
                     self.log.emit(f"DataFrame shape: {importance_df.shape}")
+                    
+                    # v2.0: Log actual values for diagnostics — helps identify
+                    # when a model type produces zero/NaN values.
+                    for col in available_cols:
+                        if col.endswith('_norm') or col == 'average_rank':
+                            continue  # Skip derived columns
+                        vals = importance_df[col]
+                        total = vals.abs().sum()
+                        all_zero = (total == 0)
+                        all_nan = vals.isna().all()
+                        self.log.emit(
+                            f"  {col}: sum={total:.6f}, "
+                            f"all_zero={all_zero}, all_nan={all_nan}"
+                        )
                     
                     if not available_cols:
                         self.log.emit("WARNING: No importance columns were computed!")
@@ -161,7 +176,7 @@ class ExplainabilityTab(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self._main_window = parent  # v2.0 FIX: self._main_window overwrites PyQt parent()
         self.explainer = ModelExplainer()
         self.domain_analyzer = DomainApplicabilityAnalyzer()
         self.analysis_thread = None
@@ -190,6 +205,7 @@ class ExplainabilityTab(QWidget):
         model_layout.addWidget(self.model_combo)
         
         self.refresh_btn = QPushButton("Refresh Model List")
+        self.refresh_btn.setToolTip("Update the list with trained models available for analysis")
         self.refresh_btn.clicked.connect(self._refresh_models)
         model_layout.addWidget(self.refresh_btn)
         
@@ -200,18 +216,34 @@ class ExplainabilityTab(QWidget):
         analysis_layout = QVBoxLayout(analysis_group)
         
         self.shap_check = QCheckBox("Compute SHAP Values")
+        self.shap_check.setToolTip(
+            "SHAP explains how each feature pushes the prediction higher or lower "
+            "from the baseline. Most accurate but slow for tree models."
+        )
         self.shap_check.setChecked(True)
         analysis_layout.addWidget(self.shap_check)
         
         self.perm_check = QCheckBox("Compute Permutation Importance")
+        self.perm_check.setToolTip(
+            "Measures feature importance by shuffling each feature and observing "
+            "the drop in model performance. Model-agnostic and reliable."
+        )
         self.perm_check.setChecked(True)
         analysis_layout.addWidget(self.perm_check)
         
         self.pdp_check = QCheckBox("Compute Partial Dependence Plots")
+        self.pdp_check.setToolTip(
+            "Shows how changing one feature affects the model's prediction "
+            "while keeping all other features fixed. Useful for understanding trends."
+        )
         self.pdp_check.setChecked(True)
         analysis_layout.addWidget(self.pdp_check)
         
         self.domain_check = QCheckBox("Analyze Domain Applicability")
+        self.domain_check.setToolTip(
+            "Estimates how confident the model is when predicting on new data. "
+            "Flags predictions outside the training domain (low reliability)."
+        )
         self.domain_check.setChecked(True)
         analysis_layout.addWidget(self.domain_check)
         
@@ -221,6 +253,7 @@ class ExplainabilityTab(QWidget):
         self.n_features_spin.setRange(1, 100)
         self.n_features_spin.setValue(10)
         self.n_features_spin.setSingleStep(1)
+        self.n_features_spin.setToolTip("Number of most important features to display in plots and tables")
         analysis_layout.addWidget(self.n_features_spin)
         
         left_layout.addWidget(analysis_group)
@@ -243,6 +276,21 @@ class ExplainabilityTab(QWidget):
         """)
         self.analyze_btn.clicked.connect(self._run_analysis)
         left_layout.addWidget(self.analyze_btn)
+        
+        # Export results button
+        self.export_btn = QPushButton("Export Results as Text")
+        self.export_btn.setToolTip("Save all explainability results to a text file")
+        self.export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #455a64;
+                color: white;
+                font-weight: bold;
+                padding: 10px;
+                font-size: 11pt;
+            }
+        """)
+        self.export_btn.clicked.connect(self._export_results)
+        left_layout.addWidget(self.export_btn)
         
         # Log area
         log_group = QGroupBox("Analysis Log")
@@ -349,17 +397,24 @@ class ExplainabilityTab(QWidget):
         """Refresh model list from all sources."""
         self.model_combo.clear()
         
-        if self.parent is None:
+        if self._main_window is None:
             return
         
         models_added = []
         
-        # 1. Add trained models
-        if hasattr(self.parent, 'training_tab'):
+        # 1. Add trained models (sklearn only — NNs are added separately from nn_tab)
+        # v2.0 FIX: Skip is_neural_network=True results here to prevent duplication.
+        # NNs are stored in BOTH trainer.results (by train_neural_network) AND
+        # nn_tab.nn_training_results (by nn_builder_tab). Adding from both sources
+        # causes each NN to appear twice in the combo.
+        if hasattr(self._main_window, 'training_tab'):
             try:
-                trainer = self.parent.training_tab.get_trainer()
+                trainer = self._main_window.training_tab.get_trainer()
                 if trainer and hasattr(trainer, 'results') and trainer.results:
                     for name, result in trainer.results.items():
+                        # Skip NNs — they are added from nn_tab in section 3
+                        if getattr(result, 'is_neural_network', False):
+                            continue
                         display_name = f"{name} (Trained)"
                         self.model_combo.addItem(display_name, ('trained', name, result))
                         models_added.append(name)
@@ -367,9 +422,9 @@ class ExplainabilityTab(QWidget):
                 print(f"Error loading trained models: {e}")
         
         # 2. Add optimized models
-        if hasattr(self.parent, 'optimization_tab'):
+        if hasattr(self._main_window, 'optimization_tab'):
             try:
-                opt_tab = self.parent.optimization_tab
+                opt_tab = self._main_window.optimization_tab
                 if hasattr(opt_tab, 'optimization_results') and opt_tab.optimization_results:
                     for model_name, opt_result in opt_tab.optimization_results:
                         display_name = f"{model_name} (Optimized)"
@@ -379,9 +434,9 @@ class ExplainabilityTab(QWidget):
                 print(f"Error loading optimized models: {e}")
         
         # 3. Add neural networks (trained)
-        if hasattr(self.parent, 'nn_tab'):
+        if hasattr(self._main_window, 'nn_tab'):
             try:
-                nn_tab = self.parent.nn_tab
+                nn_tab = self._main_window.nn_tab
                 if hasattr(nn_tab, 'nn_training_results') and nn_tab.nn_training_results:
                     for nn_name, nn_result in nn_tab.nn_training_results:
                         display_name = f"{nn_name} (Neural Network)"
@@ -391,9 +446,9 @@ class ExplainabilityTab(QWidget):
                 print(f"Error loading neural networks: {e}")
         
         # 4. Add neural networks (optimized)
-        if hasattr(self.parent, 'nn_tab'):
+        if hasattr(self._main_window, 'nn_tab'):
             try:
-                nn_tab = self.parent.nn_tab
+                nn_tab = self._main_window.nn_tab
                 if hasattr(nn_tab, 'nn_optimizer_results') and nn_tab.nn_optimizer_results:
                     for opt_name, opt_result in nn_tab.nn_optimizer_results:
                         display_name = f"{opt_name} (NN Optimized)"
@@ -420,8 +475,15 @@ class ExplainabilityTab(QWidget):
     
     def _on_analysis_finished(self, results):
         """Handle analysis finished."""
+        # v2.0 GUARD: Prevent duplicate processing if thread emits multiple times
+        if hasattr(self, '_analysis_completed') and self._analysis_completed:
+            return
+        self._analysis_completed = True
+        
         self.progress_bar.setVisible(False)
         self.analyze_btn.setEnabled(True)
+        # v2.0: Clean up thread reference to allow re-runs
+        self.analysis_thread = None
         
         importance_df = results.get('importance_df')
         shap_result = results.get('shap_result')
@@ -430,8 +492,21 @@ class ExplainabilityTab(QWidget):
         
         # Update Feature Importance table
         if importance_df is not None and not importance_df.empty:
-            self._update_importance_table(importance_df)
-            self._log(f"Feature Importance table updated with {len(importance_df)} rows")
+            # v2.0: Verify the DataFrame has actual values before displaying
+            value_cols = [c for c in importance_df.columns 
+                         if c not in ('feature', 'average_rank') 
+                         and not c.endswith('_norm')]
+            has_any_values = any(
+                importance_df[c].abs().sum() > 0 
+                for c in value_cols if c in importance_df.columns
+            )
+            if has_any_values:
+                self._update_importance_table(importance_df)
+                self._log(f"Feature Importance table updated with {len(importance_df)} rows")
+            else:
+                self._log("WARNING: Feature importance computed but all values are zero!")
+                self._log(f"  Columns checked: {value_cols}")
+                self.importance_table.setRowCount(0)
         else:
             self._log("WARNING: Feature importance DataFrame is empty!")
             self.importance_table.setRowCount(0)
@@ -502,13 +577,32 @@ class ExplainabilityTab(QWidget):
     
     def _on_analysis_error(self, error_msg):
         """Handle analysis error."""
+        # v2.0 GUARD: Prevent duplicate error dialogs
+        if hasattr(self, '_analysis_completed') and self._analysis_completed:
+            return
+        self._analysis_completed = True
+        
         self.progress_bar.setVisible(False)
         self.analyze_btn.setEnabled(True)
+        # v2.0: Clean up thread reference
+        self.analysis_thread = None
         self._log(f"ERROR: {error_msg}")
         QMessageBox.critical(self, "Error", f"Analysis failed:\n{error_msg}")
     
     def _run_analysis(self):
         """Run explainability analysis."""
+        # v2.0 GUARD: Prevent multiple simultaneous analyses
+        if self.analysis_thread is not None and self.analysis_thread.isRunning():
+            QMessageBox.warning(
+                self, "Analysis Running",
+                "An explainability analysis is already in progress.\n"
+                "Please wait for it to complete."
+            )
+            return
+        
+        # v2.0: Reset completion flag for new run
+        self._analysis_completed = False
+        
         # Get selected model
         model_data = self._get_selected_model()
         if model_data is None:
@@ -518,11 +612,11 @@ class ExplainabilityTab(QWidget):
         model_type, model_name, result = model_data
         
         # Get data
-        if self.parent is None:
+        if self._main_window is None:
             QMessageBox.warning(self, "Warning", "No data available")
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = self._main_window.data_tab.get_data_manager()
         if data_manager is None:
             QMessageBox.warning(self, "Warning", "No data loaded")
             return
@@ -597,6 +691,23 @@ class ExplainabilityTab(QWidget):
             else:
                 analysis_model = model
                 self._log(f"Model type: {type(analysis_model)}")
+            
+            # v2.0: Check if model supports built-in feature importance.
+            # CRITICAL FIX: When model is a sklearn Pipeline, we must drill
+            # into the last step (the actual estimator) to check for
+            # feature_importances_. The Pipeline wrapper itself does NOT have
+            # this attribute, which was causing HistGradientBoosting and all
+            # tree-based models to incorrectly show "no built-in FI".
+            _fi_check_model = analysis_model
+            if hasattr(analysis_model, 'named_steps') and analysis_model.named_steps:
+                _fi_check_model = list(analysis_model.named_steps.values())[-1]
+            has_builtin_fi = hasattr(_fi_check_model, 'feature_importances_')
+            self._log(f"Model has feature_importances_: {has_builtin_fi} (checked on {_fi_check_model.__class__.__name__})")
+            if not has_builtin_fi and not is_nn:
+                self._log(
+                    "WARNING: This model does not provide built-in feature importance. "
+                    "Only permutation importance and SHAP will be available."
+                )
             
             # Check if model has predict method
             if not hasattr(analysis_model, 'predict'):
@@ -677,6 +788,18 @@ class ExplainabilityTab(QWidget):
     
     def _explain_prediction(self):
         """Explain a single prediction."""
+        # v2.0 GUARD: Prevent multiple simultaneous explanations
+        if hasattr(self, '_explain_running') and self._explain_running:
+            return
+        self._explain_running = True
+        
+        try:
+            self._do_explain_prediction()
+        finally:
+            self._explain_running = False
+    
+    def _do_explain_prediction(self):
+        """Internal: explain a single prediction."""
         # Get selected model
         model_data = self._get_selected_model()
         if model_data is None:
@@ -685,10 +808,10 @@ class ExplainabilityTab(QWidget):
         
         model_type, model_name, result = model_data
         
-        if self.parent is None:
+        if self._main_window is None:
             return
         
-        data_manager = self.parent.data_tab.get_data_manager()
+        data_manager = self._main_window.data_tab.get_data_manager()
         if data_manager is None:
             return
         
@@ -717,13 +840,18 @@ class ExplainabilityTab(QWidget):
                 return
             
             instance_idx = self.instance_spin.value()
-            
+
             if instance_idx >= len(X_test):
                 QMessageBox.warning(self, "Warning", "Instance index out of range")
                 return
-            
-            X_instance = X_test[instance_idx]
-            
+
+            # v2.0: X_test is now a DataFrame (raw). Use .iloc for positional
+            # indexing so it works regardless of the DataFrame's index labels.
+            if hasattr(X_test, 'iloc'):
+                X_instance = X_test.iloc[instance_idx].values.reshape(1, -1)
+            else:
+                X_instance = X_test[instance_idx]
+
             # For NN, use the actual PyTorch model
             analysis_model = model.model if is_nn else model
             
@@ -767,3 +895,157 @@ class ExplainabilityTab(QWidget):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to explain prediction:\n{str(e)}")
+    
+    def _export_results(self):
+        """Export all explainability results to a text file."""
+        # Get selected model info for the filename
+        model_data = self._get_selected_model()
+        model_type, model_name, _ = model_data if model_data else (None, "unknown", None)
+        
+        # Suggest filename with model name and timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"explainability_{model_name or 'results'}_{timestamp}.txt"
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Explainability Results",
+            default_name,
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            lines = []
+            separator = "=" * 80
+            
+            # Header
+            lines.append(separator)
+            lines.append("AUTOAIM STUDIO v2.0.0 - EXPLAINABILITY REPORT")
+            lines.append(separator)
+            lines.append("")
+            lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append(f"Model: {model_name or 'N/A'} ({model_type or 'N/A'})")
+            lines.append("")
+            
+            # 1. Feature Importance
+            lines.append(separator)
+            lines.append("SECTION 1: FEATURE IMPORTANCE")
+            lines.append(separator)
+            lines.append("")
+            
+            row_count = self.importance_table.rowCount()
+            col_count = self.importance_table.columnCount()
+            
+            if row_count > 0:
+                # Header row
+                headers = []
+                for c in range(col_count):
+                    header_item = self.importance_table.horizontalHeaderItem(c)
+                    headers.append(header_item.text() if header_item else f"Col{c}")
+                lines.append("  ".join(f"{h:>20}" for h in headers))
+                lines.append("-" * 100)
+                
+                # Data rows
+                for r in range(row_count):
+                    row_values = []
+                    for c in range(col_count):
+                        item = self.importance_table.item(r, c)
+                        row_values.append(item.text() if item else "N/A")
+                    lines.append("  ".join(f"{v:>20}" for v in row_values))
+            else:
+                lines.append("No feature importance data available.")
+            
+            lines.append("")
+            
+            # 2. SHAP Values
+            lines.append(separator)
+            lines.append("SECTION 2: SHAP VALUES")
+            lines.append(separator)
+            lines.append("")
+            
+            shap_plain = self.shap_text.toPlainText().strip()
+            if shap_plain:
+                lines.append(shap_plain)
+            else:
+                lines.append("No SHAP values available.")
+            
+            lines.append("")
+            
+            # 3. Partial Dependence
+            lines.append(separator)
+            lines.append("SECTION 3: PARTIAL DEPENDENCE PLOTS")
+            lines.append(separator)
+            lines.append("")
+            
+            pdp_plain = self.pdp_text.toPlainText().strip()
+            if pdp_plain:
+                lines.append(pdp_plain)
+            else:
+                lines.append("No partial dependence data available.")
+            
+            lines.append("")
+            
+            # 4. Domain Applicability
+            lines.append(separator)
+            lines.append("SECTION 4: DOMAIN APPLICABILITY")
+            lines.append(separator)
+            lines.append("")
+            
+            domain_plain = self.domain_text.toPlainText().strip()
+            if domain_plain:
+                lines.append(domain_plain)
+            else:
+                lines.append("No domain applicability data available.")
+            
+            lines.append("")
+            
+            # 5. Prediction Explanation
+            lines.append(separator)
+            lines.append("SECTION 5: PREDICTION EXPLANATION")
+            lines.append(separator)
+            lines.append("")
+            
+            explain_plain = self.explanation_text.toPlainText().strip()
+            if explain_plain:
+                lines.append(explain_plain)
+            else:
+                lines.append("No prediction explanation available. Use 'Explain Prediction' to generate one.")
+            
+            lines.append("")
+            
+            # 6. Analysis Log
+            lines.append(separator)
+            lines.append("SECTION 6: ANALYSIS LOG")
+            lines.append(separator)
+            lines.append("")
+            
+            log_plain = self.log_text.toPlainText().strip()
+            if log_plain:
+                lines.append(log_plain)
+            else:
+                lines.append("No analysis log entries.")
+            
+            lines.append("")
+            lines.append(separator)
+            lines.append("END OF REPORT")
+            lines.append(separator)
+            
+            # Write to file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(lines))
+            
+            self._log(f"Results exported to: {file_path}")
+            QMessageBox.information(
+                self, "Export Complete",
+                f"Explainability results successfully exported to:\n{file_path}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Error",
+                f"Failed to export results:\n{str(e)}"
+            )
+            self._log(f"ERROR exporting results: {str(e)}")

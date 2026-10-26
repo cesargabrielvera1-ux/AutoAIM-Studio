@@ -2,7 +2,7 @@
 
 import time
 import warnings
-from typing import Dict, List, Optional, Tuple, Any, Callable
+from typing import Dict, List, Optional, Tuple, Any, Callable, Union
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -28,13 +28,24 @@ class EnsembleResult:
     optimized_weights: Optional[Dict[str, float]] = None
     optimization_trials: int = 0
     base_models: Optional[Dict[str, Any]] = None  # v1.3.0: Store base models for prediction
+    confidence_interval_params: Optional[Dict[str, Any]] = None  # v1.5.0: CI params
+    external_metrics: Optional[Dict[str, float]] = None  # v1.5.0: External validation metrics
+    has_external_validation: bool = False  # v1.5.0: Flag for external validation
+    # v2.0: full CV info for consistency with sklearn/NN results
+    cv_strategy: str = 'kfold'
+    cv_metrics: Optional[Dict[str, Any]] = None
+    cv_config_dict: Optional[Dict[str, Any]] = None
     
-    def predict(self, X: np.ndarray) -> np.ndarray:
+    def predict(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """Generate predictions using stored base models and weights.
-        
+
+        v2.0: Accepts both numpy arrays and pandas DataFrames (the latter is
+        required when base models are sklearn Pipelines with ColumnTransformers
+        that select columns by name).
+
         Args:
-            X: Feature matrix (n_samples, n_features)
-            
+            X: Feature matrix (n_samples, n_features) or DataFrame.
+
         Returns:
             Ensemble predictions (n_samples,)
         """
@@ -90,17 +101,27 @@ class EnsembleTrainer(LoggerMixin):
         self,
         ensemble_type: str,
         model_names: List[str],
-        X_train: np.ndarray,
+        X_train: Union[np.ndarray, pd.DataFrame],
         y_train: np.ndarray,
-        X_test: Optional[np.ndarray] = None,
+        X_test: Optional[Union[np.ndarray, pd.DataFrame]] = None,
         y_test: Optional[np.ndarray] = None,
         cv_folds: int = 5,
         random_state: int = 42,
         progress_callback: Optional[Callable[[str, float], None]] = None,
-        weights: Optional[Dict[str, float]] = None
+        weights: Optional[Dict[str, float]] = None,
+        # v1.5.0: External validation set for dual metrics
+        X_external_val: Optional[Union[np.ndarray, pd.DataFrame]] = None,
+        y_external_val: Optional[np.ndarray] = None,
+        # v2.0: full CV configuration + group labels (stratified/group/LOO/LOGO)
+        cv_config: Optional[Any] = None,
+        cv_groups: Optional[np.ndarray] = None,
+        # v2.0: preprocessor is accepted for API consistency but not used here
+        # because the ensemble reuses already-trained base models (which are
+        # already Pipelines when preprocessor was passed during their training).
+        preprocessor: Optional[Any] = None,
     ) -> EnsembleResult:
         """Train an ensemble of models.
-        
+
         Args:
             ensemble_type: Type of ensemble ('weighted_average', 'stacking')
             model_names: List of trained model names to include
@@ -110,7 +131,10 @@ class EnsembleTrainer(LoggerMixin):
             y_test: Test targets
             cv_folds: Number of CV folds for ensemble evaluation
             progress_callback: Callback for progress updates
-            
+            cv_config: full CV configuration (v2.0). Takes precedence over
+                cv_folds; carries group labels for grouped strategies.
+            cv_groups: group labels aligned with X_train (v2.0).
+
         Returns:
             EnsembleResult with ensemble metrics
         """
@@ -192,35 +216,48 @@ class EnsembleTrainer(LoggerMixin):
             else:
                 metrics['accuracy'] = accuracy_score(y_test, ensemble_pred)
         
-        # Cross-validation for ensemble
+        # v2.0: Cross-validation via the shared cv_factory plan (same five
+        # strategies as sklearn/NN: K-Fold, Stratified, Group K-Fold, LOO, LOGO).
+        from .cv_factory import CVConfig, build_cv_plan, assemble_cv_metrics
+        if cv_config is None:
+            cv_config = CVConfig(strategy='kfold', n_folds=cv_folds, random_state=random_state)
+        if cv_groups is not None:
+            cv_config.groups = np.asarray(cv_groups)
+        cv_plan = build_cv_plan(cv_config, X_train, y_train, problem_type=problem_type)
+        n_splits = cv_plan.n_splits_actual
+
         cv_scores = []
-        if cv_folds > 1 and len(X_train) >= cv_folds * 2:
+        cv_metrics_dict = {'test_score': [], 'train_score': []}
+        if n_splits > 1 and len(X_train) >= 2:
             if progress_callback:
-                progress_callback(f"Running {cv_folds}-fold CV...", 0.8)
-            
+                progress_callback(f"Running {n_splits}-fold CV...", 0.8)
+
             try:
-                kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-                
-                for train_idx, val_idx in kf.split(X_train):
+                fold_sizes = []
+                oof_preds = np.full(len(X_train), np.nan)
+
+                for train_idx, val_idx in cv_plan.splitter.split(
+                        X_train, y_train, groups=cv_plan.split_labels):
                     X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
                     y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
-                    
+                    fold_sizes.append(len(val_idx))
+
                     # Get fold predictions from each model
                     fold_predictions = {}
                     fold_train_preds = {}
-                    
+
                     for name in model_names:
                         if name not in self.trainer.results:
                             continue
                         result = self.trainer.results[name]
-                        
+
                         if result.is_neural_network:
                             fold_train_preds[name] = result.model.predict(X_fold_train)
                             fold_predictions[name] = result.model.predict(X_fold_val)
                         else:
                             fold_train_preds[name] = result.model.predict(X_fold_train)
                             fold_predictions[name] = result.model.predict(X_fold_val)
-                    
+
                     # Compute ensemble prediction for this fold
                     if ensemble_type == 'weighted_average':
                         fold_weights = {name: 1.0 / len(fold_predictions) for name in fold_predictions}
@@ -229,18 +266,37 @@ class EnsembleTrainer(LoggerMixin):
                         fold_ensemble_pred = self._stacking(
                             fold_train_preds, fold_train_preds, y_fold_train, fold_predictions
                         )
-                    
+
                     if fold_ensemble_pred is not None:
                         if fold_ensemble_pred.ndim > 1 and fold_ensemble_pred.shape[1] == 1:
                             fold_ensemble_pred = fold_ensemble_pred.flatten()
-                        
+
+                        # v2.0: collect OOF predictions for OOF strategies.
+                        oof_preds[val_idx] = fold_ensemble_pred
+
+                        # Per-fold score only meaningful with >= 2 points (R²).
                         if problem_type == 'regression':
-                            cv_scores.append(r2_score(y_fold_val, fold_ensemble_pred))
+                            cv_scores.append(r2_score(y_fold_val, fold_ensemble_pred)
+                                             if len(val_idx) >= 2 else np.nan)
                         else:
                             cv_scores.append(accuracy_score(y_fold_val, fold_ensemble_pred))
+
+                # v2.0: assemble via the shared helper (OOF global R² + per-unit
+                # MAE for LOO/LOGO; per-fold R²/accuracy otherwise).
+                cv_metrics_dict = assemble_cv_metrics(
+                    y=y_train,
+                    plan=cv_plan,
+                    problem_type=problem_type,
+                    oof_preds=oof_preds,
+                    fold_test_scores=cv_scores,
+                    fold_train_scores=[],
+                    fold_sizes=fold_sizes,
+                )
+                # Keep cv_scores in sync with the assembled per-fold/per-unit scores.
+                cv_scores = cv_metrics_dict.get('test_score', cv_scores)
             except Exception as e:
                 self.logger.error(f"Ensemble CV failed: {e}")
-        
+
         if progress_callback:
             progress_callback("Done!", 1.0)
         
@@ -252,6 +308,51 @@ class EnsembleTrainer(LoggerMixin):
             if name in self.trainer.results:
                 base_models[name] = self.trainer.results[name].model
         
+        # v1.5.0: Compute ensemble confidence intervals from base model spread
+        ci_params = None
+        if problem_type == 'regression' and predictions:
+            # Stack all model predictions (n_models, n_samples)
+            all_preds = np.array([p for p in predictions.values() if p is not None])
+            if all_preds.size > 0:
+                pred_std = float(np.std(all_preds, axis=0).mean())
+                ci_params = {
+                    'type': 'regression',
+                    'residuals_std': pred_std,
+                    'quantile_68': pred_std,
+                    'quantile_95': 2.0 * pred_std,
+                    'n_base_models': len(predictions),
+                }
+        
+        # v1.5.0: External validation metrics
+        external_metrics = {}
+        has_external_validation = False
+        if X_external_val is not None and y_external_val is not None:
+            ext_predictions = {}
+            for name in model_names:
+                if name in self.trainer.results:
+                    result = self.trainer.results[name]
+                    if hasattr(result, 'model') and result.model is not None:
+                        ext_predictions[name] = result.model.predict(X_external_val)
+            if ext_predictions:
+                if ensemble_type == 'weighted_average':
+                    ext_ensemble_pred = self._weighted_average(ext_predictions, weights)
+                else:
+                    ext_train_preds = {n: result.model.predict(X_train) 
+                                      for n, result in self.trainer.results.items() 
+                                      if n in model_names and hasattr(result, 'model') and result.model is not None}
+                    ext_ensemble_pred = self._stacking(
+                        ext_train_preds, ext_train_preds, y_train, ext_predictions
+                    )
+                if ext_ensemble_pred is not None:
+                    if ext_ensemble_pred.ndim > 1 and ext_ensemble_pred.shape[1] == 1:
+                        ext_ensemble_pred = ext_ensemble_pred.flatten()
+                    if problem_type == 'regression':
+                        external_metrics['r2'] = r2_score(y_external_val, ext_ensemble_pred)
+                        external_metrics['rmse'] = np.sqrt(mean_squared_error(y_external_val, ext_ensemble_pred))
+                    else:
+                        external_metrics['accuracy'] = accuracy_score(y_external_val, ext_ensemble_pred)
+                    has_external_validation = True
+        
         result = EnsembleResult(
             ensemble_type=ensemble_type,
             model_names=list(predictions.keys()),
@@ -262,7 +363,14 @@ class EnsembleTrainer(LoggerMixin):
             problem_type=problem_type,
             predictions=ensemble_pred,
             true_values=y_test,
-            base_models=base_models
+            base_models=base_models,
+            confidence_interval_params=ci_params,
+            external_metrics=external_metrics if has_external_validation else None,
+            has_external_validation=has_external_validation,
+            # v2.0: full CV info for consistency with sklearn/NN results
+            cv_strategy=cv_config.strategy,
+            cv_metrics=cv_metrics_dict,
+            cv_config_dict=cv_config.to_dict(),
         )
         
         ensemble_name = f"Ensemble_{ensemble_type}_{len(self.results) + 1}"
@@ -283,7 +391,10 @@ class EnsembleTrainer(LoggerMixin):
         n_trials: int = 50,
         cv_folds: int = 5,
         random_state: int = 42,
-        progress_callback: Optional[Callable[[int, float, Dict], None]] = None
+        progress_callback: Optional[Callable[[int, float, Dict], None]] = None,
+        # v2.0: full CV configuration + group labels (stratified/group/LOO/LOGO)
+        cv_config: Optional[Any] = None,
+        cv_groups: Optional[np.ndarray] = None,
     ) -> EnsembleResult:
         """Optimize ensemble weights using Bayesian optimization.
 
@@ -294,12 +405,30 @@ class EnsembleTrainer(LoggerMixin):
             n_trials: Number of optimization trials
             cv_folds: Number of CV folds
             progress_callback: Callback(trial_num, score, weights)
+            cv_config: full CV configuration (v2.0). Takes precedence over
+                cv_folds; carries group labels for grouped strategies.
+            cv_groups: group labels aligned with X (v2.0).
 
         Returns:
             EnsembleResult with optimized weights and computed metrics
         """
         import time
         start_time = time.time()
+
+        # v2.0: build the shared CV plan once (splitter + scoring + OOF flag).
+        from .cv_factory import CVConfig, build_cv_plan
+        if cv_config is None:
+            cv_config = CVConfig(strategy='kfold', n_folds=cv_folds, random_state=random_state)
+        if cv_groups is not None:
+            cv_config.groups = np.asarray(cv_groups)
+        # Determine problem type from the first included model (fallback regression).
+        _pt = 'regression'
+        try:
+            if model_names and model_names[0] in self.trainer.results:
+                _pt = self.trainer.results[model_names[0]].problem_type
+        except Exception:
+            pass
+        _cv_plan = build_cv_plan(cv_config, X, y, problem_type=_pt)
 
         try:
             import optuna
@@ -381,11 +510,14 @@ class EnsembleTrainer(LoggerMixin):
 
             weight_dict = dict(zip(model_names, weights))
 
-            # Evaluate with cross-validation
+            # v2.0: Evaluate with the shared CV plan (group/stratified/LOO/LOGO).
+            # For OOF strategies in regression, R² is undefined for a 1-sample
+            # fold, so we optimize negative MAE (defined for a single point).
             scores = []
-            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+            use_mae = _cv_plan.use_oof and problem_type == 'regression'
 
-            for train_idx, val_idx in kf.split(X):
+            for train_idx, val_idx in _cv_plan.splitter.split(
+                    X, y, groups=_cv_plan.split_labels):
                 y_val = y[val_idx]
 
                 # Combine predictions with weights for validation fold
@@ -401,7 +533,10 @@ class EnsembleTrainer(LoggerMixin):
                         ensemble_pred += weight * pred
 
                 if problem_type == 'regression':
-                    scores.append(r2_score(y_val, ensemble_pred))
+                    if use_mae:
+                        scores.append(-float(np.mean(np.abs(y_val - ensemble_pred))))
+                    else:
+                        scores.append(r2_score(y_val, ensemble_pred))
                 else:
                     scores.append(accuracy_score(y_val, ensemble_pred))
 

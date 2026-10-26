@@ -25,6 +25,7 @@ class ColumnInfo:
     is_categorical: bool
     is_composition: bool
     is_target: bool = False
+    is_id_column: bool = False  # v2.0: ID column for crystal structure linking
     null_count: int = 0
     unique_count: int = 0
     sample_values: List[Any] = field(default_factory=list)
@@ -59,11 +60,17 @@ class DataManager(LoggerMixin):
         self._validation_data: Optional[pd.DataFrame] = None
         self._dataset_info: Optional[DatasetInfo] = None
         self._target_column: Optional[str] = None
+        self._id_column: Optional[str] = None  # v2.0: ID column for crystal linking
         self._feature_columns: List[str] = []
         self._preprocessor: Optional[Pipeline] = None
         self._label_encoder: Optional[LabelEncoder] = None
         self._is_classification: bool = False
         self._processed_feature_names: Optional[List[str]] = None
+        # v2.0: Crystal feature extractor state
+        self._crystal_extractor: Optional[Any] = None
+        self._crystal_features_active: bool = False
+        # v2.0: Store original file path for export and restore operations
+        self._file_path: Optional[str] = None
         
     @property
     def data(self) -> Optional[pd.DataFrame]:
@@ -78,6 +85,18 @@ class DataManager(LoggerMixin):
     @property
     def dataset_info(self) -> Optional[DatasetInfo]:
         """Get dataset information."""
+        return self._dataset_info
+    
+    def get_column_info(self) -> Optional[DatasetInfo]:
+        """Re-analyze and return current column information.
+        
+        This is a convenience wrapper around _analyze_dataset() that is safe
+        to call after any data modification (link, unlink, preprocessing).
+        Returns the refreshed DatasetInfo or None if no data is loaded.
+        """
+        if self._data is None:
+            return None
+        self._dataset_info = self._analyze_dataset()
         return self._dataset_info
     
     @property
@@ -95,6 +114,78 @@ class DataManager(LoggerMixin):
         """Check if problem is classification."""
         return self._is_classification
     
+    @property
+    def id_column(self) -> Optional[str]:
+        """v2.0: Get ID column name for crystal structure linking."""
+        return self._id_column
+    
+    @property
+    def crystal_features_active(self) -> bool:
+        """v2.0: Check if crystal structure features are linked."""
+        return self._crystal_features_active
+    
+    def set_id_column(self, column: Optional[str]) -> None:
+        """v2.0: Set or clear the ID column for crystal structure linking.
+        
+        The ID column is excluded from feature columns automatically.
+        """
+        if column == self._id_column:
+            return
+        self._id_column = column
+        if column and self._data is not None:
+            self._update_feature_columns()
+        self.logger.info(f"ID column set to: {column}")
+    
+    def set_crystal_extractor(self, extractor: Optional[Any]) -> None:
+        """v2.0: Set the crystal feature extractor instance."""
+        self._crystal_extractor = extractor
+        self._crystal_features_active = extractor is not None and extractor.is_linked()
+
+    def _update_feature_columns(self) -> None:
+        """Recalculate feature columns excluding ID column and target.
+
+        v2.0: Called after set_id_column to ensure the ID column is not
+        included in the feature set for training.
+        """
+        if self._data is None:
+            return
+        numeric_cols = self._data.select_dtypes(include=[np.number]).columns.tolist()
+        exclude = {self._target_column, self._id_column}
+        self._feature_columns = [c for c in numeric_cols if c not in exclude]
+        self.logger.info(
+            f"Feature columns updated: {len(self._feature_columns)} features. "
+            f"Excluded: target={self._target_column}, id={self._id_column}"
+        )
+
+    def unset_crystal_link(self) -> None:
+        """v2.0: Remove crystal structure link and restore state.
+
+        Clears the ID column, removes crystal features from the dataset,
+        and resets the crystal extractor state.
+        """
+        if not self._crystal_features_active or self._data is None:
+            return
+
+        # Remove crystal feature columns
+        crystal_cols = [c for c in self._data.columns if c.startswith('crystal_')]
+        if crystal_cols:
+            self._data = self._data.drop(columns=crystal_cols)
+            self.logger.info(f"Removed {len(crystal_cols)} crystal feature columns")
+
+        # Clear ID column marker (restore as regular column)
+        old_id = self._id_column
+        self._id_column = None
+
+        # Recalculate feature columns (ID column may now be a feature again)
+        self._update_feature_columns()
+        self._processed_feature_names = None
+
+        # Clear extractor state
+        self._crystal_extractor = None
+        self._crystal_features_active = False
+
+        self.logger.info(f"Crystal link unset. ID column '{old_id}' restored.")
+
     def load_data(
         self,
         file_path: Union[str, Path],
@@ -115,6 +206,9 @@ class DataManager(LoggerMixin):
         
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # v2.0: Store original file path for export and restore
+        self._file_path = str(file_path)
         
         # Auto-detect file type
         if file_type is None:
@@ -236,7 +330,7 @@ class DataManager(LoggerMixin):
                 pass  # Keep is_numeric=True as detected by pandas
             else:
                 # Check if it's categorical
-                if pd.api.types.is_categorical_dtype(data[col]) or unique_count <= 20:
+                if isinstance(data[col].dtype, pd.CategoricalDtype) or unique_count <= 20:
                     is_categorical = True
                 
                 # Check if it's a composition column
@@ -258,10 +352,15 @@ class DataManager(LoggerMixin):
             )
         
         memory_usage = data.memory_usage(deep=True).sum() / (1024 ** 2)
-        
+
+        # v2.0: n_features should be the actual feature columns (usable for training),
+        # NOT the total number of DataFrame columns. Exclude target and ID columns.
+        exclude = {self._target_column, self._id_column}
+        n_feature_cols = len([c for c in data.columns if c not in exclude])
+
         return DatasetInfo(
             n_samples=len(data),
-            n_features=len(data.columns),
+            n_features=n_feature_cols,
             columns=columns,
             has_missing_values=has_missing,
             memory_usage_mb=memory_usage
@@ -363,8 +462,13 @@ class DataManager(LoggerMixin):
         # the OneHotEncoder in get_preprocessor() will create one feature
         # per unique string value, exploding the feature count from ~154
         # to 600+ and making prediction impossible on new data.
+        # v2.0: Also exclude the ID column used for crystal structure linking.
         numeric_cols = self._data.select_dtypes(include=[np.number]).columns.tolist()
-        self._feature_columns = [c for c in numeric_cols if c != column]
+        id_col = self._id_column
+        self._feature_columns = [
+            c for c in numeric_cols 
+            if c != column and c != id_col
+        ]
         
         # Log what was excluded
         excluded = [c for c in self._data.columns if c not in self._feature_columns and c != column]
@@ -452,17 +556,28 @@ class DataManager(LoggerMixin):
                     categorical_cols.append(col)
         
         transformers = []
-        
+
+        # v2.0 CRITICAL FIX: Use integer column indices instead of column names.
+        # This makes the ColumnTransformer compatible with BOTH pandas DataFrames
+        # and numpy arrays. When passed a DataFrame, sklearn selects by position
+        # (iloc) when indices are integers. When passed an array, integer indices
+        # work natively. This eliminates the incompatibility between Pipeline
+        # (which receives DataFrames from tabs) and SHAP / explainability code
+        # (which works with numpy arrays).
+        col_to_idx = {col: i for i, col in enumerate(self._feature_columns)}
+        numeric_idx = [col_to_idx[c] for c in numeric_cols]
+        categorical_idx = [col_to_idx[c] for c in categorical_cols]
+
         # Numeric transformer
-        if numeric_cols:
+        if numeric_idx:
             numeric_steps = []
-            
+
             # Imputation
             if impute_strategy == 'knn':
                 numeric_steps.append(('imputer', KNNImputer(n_neighbors=5)))
             else:
                 numeric_steps.append(('imputer', SimpleImputer(strategy=impute_strategy)))
-            
+
             # Scaling
             if numeric_strategy == 'standard':
                 numeric_steps.append(('scaler', StandardScaler()))
@@ -470,19 +585,19 @@ class DataManager(LoggerMixin):
                 numeric_steps.append(('scaler', MinMaxScaler()))
             elif numeric_strategy == 'robust':
                 numeric_steps.append(('scaler', RobustScaler()))
-            
+
             numeric_pipeline = Pipeline(steps=numeric_steps)
-            transformers.append(('numeric', numeric_pipeline, numeric_cols))
-        
+            transformers.append(('numeric', numeric_pipeline, numeric_idx))
+
         # Categorical transformer
-        if categorical_cols:
+        if categorical_idx:
             categorical_steps = []
-            
+
             # Imputation
             categorical_steps.append(
                 ('imputer', SimpleImputer(strategy='most_frequent'))
             )
-            
+
             # Encoding
             if categorical_strategy == 'onehot':
                 categorical_steps.append(
@@ -491,16 +606,16 @@ class DataManager(LoggerMixin):
             elif categorical_strategy == 'label':
                 # Label encoding will be done separately
                 pass
-            
+
             categorical_pipeline = Pipeline(steps=categorical_steps)
-            transformers.append(('categorical', categorical_pipeline, categorical_cols))
-        
+            transformers.append(('categorical', categorical_pipeline, categorical_idx))
+
         preprocessor = ColumnTransformer(
             transformers=transformers,
             remainder='drop',
             verbose_feature_names_out=False
         )
-        
+
         self._preprocessor = preprocessor
         return preprocessor
     
@@ -509,78 +624,142 @@ class DataManager(LoggerMixin):
         test_size: float = 0.2,
         random_state: int = 42,
         use_validation: bool = False
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
         """Prepare data for training.
-        
+
+        v2.0 CRITICAL FIX: Returns RAW DataFrames (NOT preprocessed arrays) to
+        eliminate data leakage in cross-validation. The preprocessor is created
+        but NOT fitted here. Each CV fold will fit the scaler independently via
+        sklearn Pipeline, ensuring the validation fold never leaks into the
+        training statistics.
+
         Args:
             test_size: Fraction of data for testing
             random_state: Random seed
             use_validation: Whether to use external validation data
-            
+
         Returns:
-            Tuple of (X_train, X_test, y_train, y_test) or 
-            (X_train, X_val, y_train, y_val) if use_validation=True
+            Tuple of (X_train_raw_df, X_test_raw_df, y_train_arr, y_test_arr)
+            where X_* are pandas DataFrames with original feature column names.
         """
         if self._data is None or self._target_column is None:
             raise ValueError("Data and target column must be set")
-        
+
         from sklearn.model_selection import train_test_split
-        
+
         X = self._data[self._feature_columns]
         y = self._data[self._target_column]
-        
+
         # Encode target if classification
         if self._is_classification and not pd.api.types.is_numeric_dtype(y):
             self._label_encoder = LabelEncoder()
             y = self._label_encoder.fit_transform(y)
-        
+
         if use_validation and self._validation_data is not None:
             X_train = X
             y_train = y
-            
+
             X_test = self._validation_data[self._feature_columns]
             y_test = self._validation_data[self._target_column]
-            
+
             if self._label_encoder is not None:
                 y_test = self._label_encoder.transform(y_test)
         else:
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, random_state=random_state
             )
-        
-        # Fit preprocessor and transform
-        # FIX: Siempre recrear preprocessor para asegurar que use las feature_columns actuales
+
+        # v2.0: Create the preprocessor but DO NOT fit it here.
+        # Fitting inside each CV fold (via Pipeline) is the only way to avoid
+        # data leakage. The preprocessor is stored so tabs can pass it to
+        # trainer/optimizer/ensemble for Pipeline construction.
         self._preprocessor = None
         self.get_preprocessor()
-        
-        X_train_processed = self._preprocessor.fit_transform(X_train)
-        X_test_processed = self._preprocessor.transform(X_test)
-        
-        # FIX: Guardar los nombres de features procesados
+
+        # v2.0: Store processed feature names for reference (e.g., model cards,
+        # export). We do a one-off fit_transform on a dummy sample just to
+        # discover the output shape / names — this does NOT affect training.
         try:
-            self._processed_feature_names = self._preprocessor.get_feature_names_out().tolist()
+            _tmp = self._preprocessor.fit_transform(X_train.head(5))
+            self._processed_feature_names = (
+                self._preprocessor.get_feature_names_out().tolist()
+            )
+            # Reset so the preprocessor is truly unfitted for training
+            self._preprocessor = None
+            self.get_preprocessor()
         except Exception:
             self._processed_feature_names = self._feature_columns
-        
-        # FIX: Convert y to numpy arrays safely. After LabelEncoder, y is ndarray
-        # which doesn't have .values. np.asarray() works for both pd.Series and ndarray.
+
+        # Convert y to numpy arrays safely.
         y_train_arr = np.asarray(y_train)
         y_test_arr = np.asarray(y_test)
-        
-        return X_train_processed, X_test_processed, y_train_arr, y_test_arr
+
+        # v2.0: Return DataFrames (raw) so sklearn Pipeline can select columns
+        # by name inside each CV fold.
+        return X_train, X_test, y_train_arr, y_test_arr
     
     def get_feature_names(self) -> List[str]:
         """Get feature names after preprocessing.
-        
+
         Returns:
             List of feature names
         """
         # FIX: Usar nombres procesados si están disponibles
         if hasattr(self, '_processed_feature_names') and self._processed_feature_names:
             return self._processed_feature_names
-        
+
         # Fallback: usar _feature_columns
         return self._feature_columns
+
+    def get_composition_series(self) -> Optional[pd.Series]:
+        """Return the detected composition/formula column as a Series.
+
+        v2.0: Used to build chemical-system / formula / clustering groups for
+        grouped cross-validation. Returns None if no composition column is
+        detected among the raw columns.
+        """
+        if self._data is None:
+            return None
+        from .grouping import detect_composition_column
+        col = detect_composition_column(self._data)
+        return self._data[col] if col is not None else None
+
+    def get_train_group_labels(
+        self,
+        group_labels_full: np.ndarray,
+        test_size: float,
+        random_state: int,
+    ) -> np.ndarray:
+        """Return group labels aligned with the X_train rows from prepare_data.
+
+        v2.0: Grouped CV runs on the training set only, so group labels (built
+        over the FULL dataset) must be restricted to the training rows. This
+        recomputes the exact same train/test split that prepare_data performed:
+        sklearn's train_test_split is fully deterministic given the number of
+        samples and random_state, independent of the data content, so splitting
+        an index array of the same length yields the identical partition.
+
+        Args:
+            group_labels_full: group label for EVERY row of the loaded dataset.
+            test_size: same value passed to prepare_data.
+            random_state: same value passed to prepare_data.
+
+        Returns:
+            Group labels for the training rows only.
+        """
+        if self._data is None:
+            raise ValueError("No data loaded")
+        labels = np.asarray(group_labels_full)
+        n = len(self._data)
+        if len(labels) != n:
+            raise ValueError(
+                f"Group labels length ({len(labels)}) does not match the number "
+                f"of dataset rows ({n})."
+            )
+        from sklearn.model_selection import train_test_split
+        idx = np.arange(n)
+        train_idx, _ = train_test_split(idx, test_size=test_size, random_state=random_state)
+        return labels[train_idx]
     
     def get_preprocessed_feature_count(self) -> int:
         """Get the number of features after preprocessing.
@@ -608,6 +787,91 @@ class DataManager(LoggerMixin):
         
         # Fallback: return raw feature count (will be wrong if one-hot encoding is used)
         return len(self._feature_columns)
+    
+    def validate_columns(self) -> dict:
+        """Validate that validation data has the same feature columns as training data.
+        
+        v1.5.0: Compares feature columns between training and validation datasets.
+        Returns a detailed report for user-facing warnings.
+        
+        Returns:
+            dict with keys: 'valid' (bool), 'missing_in_val' (list),
+            'extra_in_val' (list), 'train_features' (int), 'val_features' (int),
+            'message' (str)
+        """
+        result = {
+            'valid': True,
+            'missing_in_val': [],
+            'extra_in_val': [],
+            'train_features': 0,
+            'val_features': 0,
+            'message': '',
+        }
+        
+        if self._data is None or self._validation_data is None:
+            result['message'] = 'No training or validation data loaded.'
+            return result
+        
+        train_features = set(self._feature_columns)
+        val_cols = set(self._validation_data.columns)
+        val_features = val_cols - {self._target_column} if self._target_column else val_cols
+        
+        result['train_features'] = len(train_features)
+        result['val_features'] = len(val_features)
+        
+        missing = sorted(train_features - val_features)
+        extra = sorted(val_features - train_features)
+        
+        result['missing_in_val'] = missing
+        result['extra_in_val'] = extra
+        
+        if missing:
+            result['valid'] = False
+            result['message'] = (
+                f"Validation data is missing {len(missing)} feature column(s) "
+                f"present in training data: {', '.join(missing[:5])}"
+                f"{'...' if len(missing) > 5 else ''}. "
+                f"External validation metrics will not be available. "
+                f"Ensure both datasets were featurized with the same method."
+            )
+        elif extra:
+            result['message'] = (
+                f"Validation data has {len(extra)} extra column(s) not in training: "
+                f"{', '.join(extra[:5])}{'...' if len(extra) > 5 else ''}. "
+                f"These will be ignored. Validation is aligned."
+            )
+        else:
+            result['message'] = (
+                f"Column validation passed: {len(train_features)} feature columns "
+                f"match between training and validation datasets."
+            )
+        
+        return result
+    
+    def get_validation_arrays(self, apply_preprocessing: bool = True) -> Optional[tuple]:
+        """Get validation data as (X_val_df, y_val_arr).
+
+        v2.0 FIX: Returns a RAW DataFrame by default. With sklearn Pipeline,
+        the preprocessor lives inside the model, so validation data must be
+        passed RAW to `pipeline.predict(X_val_df)`. The Pipeline applies the
+        fitted preprocessor internally. This eliminates the previous leakage
+        where the preprocessor was fitted on the full train set before CV.
+
+        Args:
+            apply_preprocessing: DEPRECATED — kept for API compatibility but
+                ignored. Preprocessing now happens inside the Pipeline.
+
+        Returns:
+            Tuple of (X_val_df, y_val_arr) or None if unavailable.
+        """
+        if self._validation_data is None or self._target_column is None:
+            return None
+        try:
+            X_val = self._validation_data[self._feature_columns]
+            y_val = self._validation_data[self._target_column]
+            return X_val, np.asarray(y_val)
+        except Exception:
+            return None
     
     def save_preprocessor(self, path: Union[str, Path]) -> None:
         """Save fitted preprocessor to file.
