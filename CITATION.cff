@@ -1,15 +1,20 @@
-# CFF Version 1.4.0
-cff-version: 1.4.0
+cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "AutoAIM Studio Auto Artificial Intelligence for Materials Studio"
+title: "AutoAIM Studio: Auto Artificial Intelligence for Materials"
 authors:
-  - names: "Cesar Gabriel Vera de la Garza; Serguei Fomine"
-    orcid: "https://orcid.org/0000-0003-2367-3534"; "https://orcid.org/0000-0002-7068-7579"
+  - family-names: "Vera De la Garza"
+    given-names: "Cesar Gabriel"
+    orcid: "https://orcid.org/0000-0003-2367-3534"
+    affiliation: "National Autonomous University of Mexico. Materials Research Institute."
+  - family-names: "Fomine"
+    given-names: "Serguei"
+    orcid: "https://orcid.org/0000-0002-7068-7579"
     affiliation: "National Autonomous University of Mexico. Materials Research Institute."
 repository-code: "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio"
-version: 1.4.0
-date-released: 2026-06-26
+url: "https://github.com/cesargabrielvera1-ux/AutoAIM-Studio"
+version: 2.0.0
+date-released: 2026-10-26
 keywords:
   - machine learning
   - materials science
@@ -24,12 +29,17 @@ keywords:
 license: MIT
 preferred-citation:
   type: article
-  title: "AutoAIM Studio: An open-source desktop application for automated machine learning in materials science"
+  title: "AutoAIM Studio: A desktop application for automated machine learning in materials science"
   authors:
-    - names: "Cesar Gabriel Vera de la Garza; Serguei Fomine"
+    - family-names: "Vera De la Garza"
+      given-names: "Cesar Gabriel"
+      orcid: "https://orcid.org/0000-0003-2367-3534"
+    - family-names: "Fomine"
+      given-names: "Serguei"
+      orcid: "https://orcid.org/0000-0002-7068-7579"
   year: 2026
-  publisher: Zenodo
-  volume: 0
-  issue: 0
-  pages: 0
-  doi: 10.5281/zenodo.20947495
+  journal: "SoftwareX"
+  volume: 35
+  pages: 102945
+  doi: "10.1016/j.softx.2026.102945"
+  url: "https://doi.org/10.1016/j.softx.2026.102945"
